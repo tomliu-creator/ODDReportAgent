@@ -98,6 +98,7 @@ def _build_pdf_chunks(pages: list[dict], source_role: str, source_tier: int) -> 
             "is_manager_answer_chunk": False,
             "has_substantive_answer": None,
             "referenced_appendices": None,
+            "embedding_text": chunk_text,
             "chunk_text": chunk_text,
             "chunk_sha": sha256_hex(chunk_text),
             "chunk_char_len": len(chunk_text),
@@ -151,17 +152,31 @@ def _build_manager_ddq_chunks(rows: list[dict], source_tier: int) -> list[dict]:
 
         for segment in segments:
             part_lines = []
+            embedding_lines = []
+            segment_question_numbers = []
             for row in segment:
+                if row.get("content_role") == "question" and row.get("question_number"):
+                    segment_question_numbers.append(row.get("question_number"))
                 prefix = ""
+                embedding_prefix = ""
                 if row.get("content_role") == "section_heading":
                     prefix = f"{section_code}. {section_title}"
+                    embedding_prefix = prefix
                 elif row.get("content_role") == "question":
-                    prefix = f"Question {row.get('question_number')}: {row.get('page_text')}"
+                    # Keep question text out of evidence chunks. The parser stores
+                    # questions separately, and retrieval should assess the
+                    # manager's answers rather than restating the questionnaire.
+                    prefix = ""
+                    embedding_prefix = f"Question {row.get('question_number')}: {row.get('page_text')}"
                 else:
                     prefix = row.get("page_text") or ""
+                    embedding_prefix = prefix
                 if normalize_text(prefix):
                     part_lines.append(prefix)
+                if normalize_text(embedding_prefix):
+                    embedding_lines.append(embedding_prefix)
             chunk_text = "\n".join(part_lines).strip()
+            embedding_text = "\n".join(embedding_lines).strip()
             if not chunk_text:
                 continue
             chunk_id = sha256_hex(
@@ -186,10 +201,11 @@ def _build_manager_ddq_chunks(rows: list[dict], source_tier: int) -> list[dict]:
                 "section_title": section_title,
                 "chapter_code": chapter_code,
                 "chapter_title": chapter_title,
-                "question_number": segment[0].get("question_number"),
+                "question_number": (segment_question_numbers or [segment[0].get("question_number")])[0],
                 "is_manager_answer_chunk": True,
                 "has_substantive_answer": has_substantive,
                 "referenced_appendices": referenced_appendices,
+                "embedding_text": embedding_text or chunk_text,
                 "chunk_text": chunk_text,
                 "chunk_sha": sha256_hex(chunk_text),
                 "chunk_char_len": len(chunk_text),
@@ -273,10 +289,7 @@ if all_chunks:
     USING new_chunks s
     ON t.chunk_id = s.chunk_id
     WHEN MATCHED AND (t.chunk_sha IS NULL OR t.chunk_sha <> s.chunk_sha) THEN UPDATE SET *
-    WHEN MATCHED THEN UPDATE SET
-      t.chunk_text = s.chunk_text,
-      t.chunk_char_len = s.chunk_char_len,
-      t.chunk_ts = current_timestamp()
+    WHEN MATCHED THEN UPDATE SET *
     WHEN NOT MATCHED THEN INSERT *
     """)
 

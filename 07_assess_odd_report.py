@@ -154,6 +154,13 @@ def _search(query_text: str, filters: dict, num_results: int) -> list[dict]:
         return _vs_extract_rows(resp)
 
     query_escaped = (query_text or "").replace("'", "''")
+    search_results = int(num_results)
+    if filters:
+        # SQL vector_search does not receive our Python-style filters here, so it returns the top N
+        # globally and Spark filters afterward. Over-fetch so prompt-driven source-role searches
+        # are not starved by DDQ hits.
+        # Databricks SQL vector_search currently caps num_results at 100.
+        search_results = min(100, max(search_results * 8, 80))
     # SQL path retained intentionally as the safer default for this workspace. Do not collapse this
     # back into Python-only retrieval without checking Databricks serving/index constraints first.
     sql_text = f"""
@@ -161,7 +168,7 @@ def _search(query_text: str, filters: dict, num_results: int) -> list[dict]:
     FROM vector_search(
       index => '{VS_INDEX_NAME}',
       query => '{query_escaped}',
-      num_results => {int(num_results)}
+      num_results => {search_results}
     )
     """
     df = spark.sql(sql_text)
@@ -171,7 +178,7 @@ def _search(query_text: str, filters: dict, num_results: int) -> list[dict]:
                 continue
             df = df.filter(F.col(key) == F.lit(value))
     filtered_df = df.select(*[c for c in vs_cols if c in df.columns])
-    return [r.asDict() for r in filtered_df.collect()]
+    return [r.asDict() for r in filtered_df.limit(int(num_results)).collect()]
 
 
 def _appendix_query_terms(chunk_rows: list[dict]) -> list[str]:
@@ -189,8 +196,32 @@ def _appendix_query_terms(chunk_rows: list[dict]) -> list[str]:
     return refs
 
 
+def _topic_query_text(topic: dict) -> str:
+    parts = [
+        topic.get("section_code"),
+        topic.get("topic_title"),
+        topic.get("chapter_title"),
+        topic.get("topic_prompt"),
+    ]
+    return " ".join(normalize_text(part) for part in parts if normalize_text(part)).strip()
+
+
+def _mandatory_source_hits(topic: dict) -> list[dict]:
+    if not normalize_text(topic.get("topic_prompt")):
+        return []
+
+    # Generic topic-prompt path: if ODDAgent.md gives a topic-specific instruction, search
+    # appendices with that same prompt text instead of hard-coding behavior for one section.
+    # This keeps source expansion driven by the runtime behavior spec.
+    return _search(
+        _topic_query_text(topic),
+        {"engagement_id": ENGAGEMENT_ID, "source_role": "appendix"},
+        max(4, FINAL_EVIDENCE_K),
+    )
+
+
 def _retrieve_for_topic(topic: dict) -> tuple[list[dict], bool]:
-    base_query = f"{topic['section_code']} {topic['topic_title']} {topic['chapter_title']}".strip()
+    base_query = _topic_query_text(topic)
     section_hits = _search(
         base_query,
         {"engagement_id": ENGAGEMENT_ID, "source_role": "manager_completed_ddq", "section_code": topic["section_code"]},
@@ -207,6 +238,7 @@ def _retrieve_for_topic(topic: dict) -> tuple[list[dict], bool]:
         {"engagement_id": ENGAGEMENT_ID, "source_role": "appendix"},
         max(4, FINAL_EVIDENCE_K),
     )
+    mandatory_hits = _mandatory_source_hits(topic)
 
     fallback_used = False
     if not section_hits or not section_substantive:
@@ -219,7 +251,7 @@ def _retrieve_for_topic(topic: dict) -> tuple[list[dict], bool]:
         section_hits = global_ddq_hits
 
     combined = []
-    for bucket_name, hits in (("section", section_hits), ("appendix", appendix_hits)):
+    for bucket_name, hits in (("section", section_hits), ("appendix", appendix_hits), ("mandatory_external", mandatory_hits)):
         for rank, hit in enumerate(hits, start=1):
             cid = hit.get("chunk_id")
             if not cid:
@@ -282,10 +314,16 @@ for topic in topics:
             "You are checking retrieval relevance for an ODD report topic.\n"
             f"TOPIC: {topic['section_code']} {topic['topic_title']}\n"
             f"CHAPTER: {topic['chapter_title']}\n\n"
+            + (f"TOPIC-SPECIFIC MUST-COVER SCOPE:\n{topic.get('topic_prompt')}\n\n" if normalize_text(topic.get("topic_prompt")) else "")
+            +
             f"CHUNK FILE: {chunk.get('file_name')}\n"
             f"PAGES: {chunk.get('page_start')}-{chunk.get('page_end')}\n"
             f"SOURCE ROLE: {chunk.get('source_role')}\n"
             f"TEXT:\n{preview}\n\n"
+            "Relevance rule: if a topic-specific must-cover scope is provided, reply yes/partial only when "
+            "the chunk contains factual evidence for at least one requested item. Do not mark source-name-only, "
+            "certification, cover, table-of-contents, or generic control text as relevant merely because it comes "
+            "from a required source document.\n"
             "Reply with valid JSON only: "
             "{\"supported\":\"yes|partial|no\",\"reason\":\"short reason\"}."
         )
@@ -372,13 +410,16 @@ def _select_evidence(topic: dict) -> tuple[list[str], list[dict], bool]:
         chunk = chunk_by_id.get(item["chunk_id"])
         if not chunk:
             continue
+        source_role = chunk.get("source_role")
+        if not source_role and item.get("bucket") == "mandatory_external":
+            source_role = "mandatory_external"
         evidence.append({
             "chunk_id": chunk["chunk_id"],
             "file_name": chunk["file_name"],
             "page_start": chunk["page_start"],
             "page_end": chunk["page_end"],
             "source_tier": _safe_int(chunk.get("source_tier"), 5),
-            "source_role": chunk.get("source_role"),
+            "source_role": source_role,
             "section_code": chunk.get("section_code"),
             "text_en": chunk["chunk_text"],
         })
@@ -411,11 +452,13 @@ for topic in topics:
 
     assessment_prompt = (
         "You are writing a formal operational due diligence report section.\n"
-        f"TEMPLATE INSTRUCTION:\n{metadata['prompt_text']}\n\n"
+        f"AGENT BEHAVIOR SPEC:\n{metadata['prompt_text']}\n\n"
         f"TOPIC: {topic['section_code']} {topic['topic_title']}\n"
         f"CHAPTER: {topic['chapter_title']}\n"
         f"MANDATE: {metadata.get('mandate_name') or ''}\n"
         f"MANAGER: {metadata.get('manager_name') or ''}\n\n"
+        + (f"TOPIC-SPECIFIC MUST-COVER SCOPE:\n{topic.get('topic_prompt')}\n\n" if normalize_text(topic.get("topic_prompt")) else "")
+        +
         "Requirements:\n"
         "- Use neutral, factual, investor-facing language.\n"
         "- Prioritize the completed manager DDQ evidence when it is substantive.\n"
@@ -478,7 +521,7 @@ for topic in topics:
     citations = parse_citations(assessment_text, evidence)
     source_tiers_used = sorted({_safe_int(item.get("source_tier"), 5) for item in evidence})
     manager_ddq_used = any(item.get("source_role") == "manager_completed_ddq" for item in evidence)
-    appendices_used = any(item.get("source_role") == "appendix" for item in evidence)
+    appendices_used = any(item.get("source_role") in {"appendix", "mandatory_external"} for item in evidence)
     review_flag = "high" if fallback_flags[topic_id] or risk_rating in {"High", "Unacceptable"} else "medium" if confidence < 0.7 else "low"
     assessment_rows.append({
         "engagement_id": ENGAGEMENT_ID,

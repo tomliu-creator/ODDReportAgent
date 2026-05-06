@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS {CHUNKS_TABLE} (
   is_manager_answer_chunk BOOLEAN,
   has_substantive_answer BOOLEAN,
   referenced_appendices STRING,
+  embedding_text STRING,
   chunk_text STRING,
   chunk_sha STRING,
   chunk_char_len INT,
@@ -172,6 +173,7 @@ for col in [
     "is_manager_answer_chunk BOOLEAN",
     "has_substantive_answer BOOLEAN",
     "referenced_appendices STRING",
+    "embedding_text STRING",
 ]:
     _add_column_if_missing(CHUNKS_TABLE, col)
 
@@ -217,6 +219,7 @@ CREATE TABLE IF NOT EXISTS {ODD_REPORT_METADATA_TABLE} (
   report_template_document_id STRING,
   report_template_path STRING,
   report_template_name STRING,
+  agent_spec_path STRING,
   mandate_name STRING,
   manager_name STRING,
   investment_strategy STRING,
@@ -242,10 +245,21 @@ CREATE TABLE IF NOT EXISTS {ODD_REPORT_TOPICS_TABLE} (
   chapter_title STRING,
   section_code STRING,
   topic_title STRING,
+  topic_prompt STRING,
   raw_topic_text STRING,
   load_ts TIMESTAMP
 ) USING DELTA
 """)
+
+for col in [
+    "agent_spec_path STRING",
+]:
+    _add_column_if_missing(ODD_REPORT_METADATA_TABLE, col)
+
+for col in [
+    "topic_prompt STRING",
+]:
+    _add_column_if_missing(ODD_REPORT_TOPICS_TABLE, col)
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ODD_RISK_DEFINITIONS_TABLE} (

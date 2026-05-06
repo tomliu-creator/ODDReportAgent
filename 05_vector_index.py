@@ -205,6 +205,7 @@ columns_to_sync = [
     "is_manager_answer_chunk",
     "has_substantive_answer",
     "referenced_appendices",
+    "embedding_text",
 ]
 
 
@@ -238,6 +239,21 @@ def _index_uses_expected_embedding_endpoint(index_handle, expected_endpoint: str
     return False
 
 
+def _index_uses_expected_embedding_source(index_handle, expected_source_column: str) -> bool | None:
+    try:
+        desc = index_handle.describe()
+    except Exception as e:
+        print(f"Unable to inspect embedding source column for existing index {VS_INDEX_NAME}: {e}")
+        return None
+    payload = json.dumps(desc).lower()
+    if expected_source_column.lower() in payload:
+        return True
+    if "embedding_source_column" not in payload and "embedding" not in payload and "schema" not in payload:
+        print(f"WARNING: index description for {VS_INDEX_NAME} does not expose embedding-source metadata.")
+        return None
+    return False
+
+
 def _delete_index(endpoint_name: str, index_name: str):
     encoded_index = requests.utils.quote(index_name, safe="")
     url = f"{_workspace_host()}/api/2.0/vector-search/indexes/{encoded_index}"
@@ -259,7 +275,10 @@ if not vsc.index_exists(endpoint_name=VS_ENDPOINT_NAME, index_name=VS_INDEX_NAME
                 primary_key="chunk_id",
                 source_table_name=VS_SOURCE_TABLE,
                 pipeline_type=PIPELINE_TYPE,
-                embedding_source_column="chunk_text",
+                # Use embedding_text for relevance matching. For manager-completed DDQ chunks this
+                # includes the original DDQ question plus the manager answer; downstream prompts
+                # still use chunk_text, which excludes question wording and contains evidence only.
+                embedding_source_column="embedding_text",
                 embedding_model_endpoint_name=EMBEDDING_MODEL_ENDPOINT,
                 columns_to_sync=columns_to_sync,
             )
@@ -283,10 +302,11 @@ else:
 
 index = vsc.get_index(endpoint_name=VS_ENDPOINT_NAME, index_name=VS_INDEX_NAME)
 uses_expected_embedding = _index_uses_expected_embedding_endpoint(index, EMBEDDING_MODEL_ENDPOINT)
-if uses_expected_embedding is False:
+uses_expected_embedding_source = _index_uses_expected_embedding_source(index, "embedding_text")
+if uses_expected_embedding is False or uses_expected_embedding_source is False:
     print(
-        f"Existing index '{VS_INDEX_NAME}' was built with a different embedding endpoint. "
-        "Deleting and recreating it so the engagement uses a Delta-Sync-compatible embeddings endpoint."
+        f"Existing index '{VS_INDEX_NAME}' was built with a different embedding configuration. "
+        "Deleting and recreating it so Vector Search embeds embedding_text while prompts use answer-only chunk_text."
     )
     _delete_index(VS_ENDPOINT_NAME, VS_INDEX_NAME)
     created_index = False
@@ -298,7 +318,8 @@ if uses_expected_embedding is False:
         primary_key="chunk_id",
         source_table_name=VS_SOURCE_TABLE,
         pipeline_type=PIPELINE_TYPE,
-        embedding_source_column="chunk_text",
+        # Keep Vector Search relevance on embedding_text while assessment evidence remains chunk_text.
+        embedding_source_column="embedding_text",
         embedding_model_endpoint_name=EMBEDDING_MODEL_ENDPOINT,
         columns_to_sync=columns_to_sync,
     )
@@ -307,7 +328,7 @@ if uses_expected_embedding is False:
 
 has_expected_columns = _index_has_expected_metadata_columns(
     index,
-    ["source_role", "section_code", "chapter_code", "has_substantive_answer", "referenced_appendices"],
+    ["source_role", "section_code", "chapter_code", "has_substantive_answer", "referenced_appendices", "embedding_text"],
 )
 if has_expected_columns is False:
     raise RuntimeError(

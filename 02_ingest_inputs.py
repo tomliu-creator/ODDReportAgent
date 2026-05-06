@@ -18,7 +18,11 @@
 import os
 
 dbutils.widgets.text("engagement_id", "odd_ssga_2025")
+dbutils.widgets.text("manager_ddq_name", "")
+dbutils.widgets.text("report_template_name", "")
 ENGAGEMENT_ID = dbutils.widgets.get("engagement_id").strip()
+MANAGER_DDQ_NAME = dbutils.widgets.get("manager_ddq_name").strip()
+REPORT_TEMPLATE_NAME = dbutils.widgets.get("report_template_name").strip()
 assert ENGAGEMENT_ID, "engagement_id is required"
 
 paths = engagement_paths(ENGAGEMENT_ID)
@@ -52,11 +56,31 @@ if REQUIRE_NONEMPTY:
 classify_source_role_udf = F.udf(classify_source_role, T.StringType())
 assign_source_tier_udf = F.udf(lambda file_name, source_path, source_role: assign_source_tier(file_name, source_path, source_role=source_role), T.IntegerType())
 
+
+def _lower_or_none(value: str) -> str | None:
+    return value.strip().lower() if value and value.strip() else None
+
+
+manager_ddq_name_lc = _lower_or_none(MANAGER_DDQ_NAME)
+report_template_name_lc = _lower_or_none(REPORT_TEMPLATE_NAME)
+
 df_docs = (
     df_files
     .withColumn("engagement_id", F.lit(ENGAGEMENT_ID))
     .withColumn("file_path_local", F.regexp_replace(F.col("file_path_dbfs"), r"^dbfs:", ""))
-    .withColumn("source_role", classify_source_role_udf(F.col("file_name")))
+    .withColumn("source_role_inferred", classify_source_role_udf(F.col("file_name")))
+    .withColumn(
+        "source_role",
+        F.when(
+            F.lit(bool(manager_ddq_name_lc)) & (F.lower(F.col("file_name")) == F.lit(manager_ddq_name_lc)),
+            F.lit("manager_completed_ddq"),
+        )
+        .when(
+            F.lit(bool(report_template_name_lc)) & (F.lower(F.col("file_name")) == F.lit(report_template_name_lc)),
+            F.lit("report_template"),
+        )
+        .otherwise(F.col("source_role_inferred"))
+    )
     .withColumn("source_tier", assign_source_tier_udf(F.col("file_name"), F.col("file_path_dbfs"), F.col("source_role")))
     .withColumn("document_id", F.sha2(F.concat_ws("||", F.lit(ENGAGEMENT_ID), F.lower(F.col("file_path_dbfs"))), 256))
     .withColumn(
@@ -73,6 +97,7 @@ df_docs = (
     )
     .withColumn("is_present", F.lit(True))
     .withColumn("load_ts", F.current_timestamp())
+    .drop("source_role_inferred")
 )
 
 display(df_docs.orderBy("source_role", "file_name"))
@@ -133,6 +158,34 @@ WHEN MATCHED AND (t.file_fingerprint IS NULL OR t.file_fingerprint <> s.file_fin
   t.source_role = s.source_role,
   t.source_tier = s.source_tier,
   t.load_ts = current_timestamp(),
+  t.parse_status = 'pending',
+  t.parse_method = null,
+  t.parse_ts = null,
+  t.parse_error = null,
+  t.chunk_status = 'pending',
+  t.chunk_ts = null,
+  t.chunk_error = null,
+  t.index_status = 'pending',
+  t.index_ts = null,
+  t.index_error = null
+WHEN MATCHED AND (
+  NOT (t.source_role <=> s.source_role)
+  OR NOT (t.source_tier <=> s.source_tier)
+) THEN UPDATE SET
+  t.engagement_id = s.engagement_id,
+  t.file_path_dbfs = s.file_path_dbfs,
+  t.file_path_local = s.file_path_local,
+  t.file_name = s.file_name,
+  t.file_ext = s.file_ext,
+  t.file_size_bytes = s.file_size_bytes,
+  t.modification_ts = s.modification_ts,
+  t.file_fingerprint = s.file_fingerprint,
+  t.is_present = true,
+  t.source_role = s.source_role,
+  t.source_tier = s.source_tier,
+  t.load_ts = current_timestamp(),
+  -- Source role/tier flow into parsed pages, chunks, filters, and Vector Search metadata.
+  -- If classification changes while file bytes are unchanged, force derived rows to rebuild.
   t.parse_status = 'pending',
   t.parse_method = null,
   t.parse_ts = null,
