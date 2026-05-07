@@ -5,7 +5,7 @@
 # COMMAND ----------
 
 # Core UC locations for the ODD assessment agent.
-CATALOG = "cmi_agent"
+CATALOG = "rag_agent"
 SCHEMA = "ddq_agent"
 VOLUME = "engagements"
 
@@ -76,6 +76,61 @@ DEFAULT_TOP_K = 20
 DEFAULT_FINAL_EVIDENCE_K = 8
 HIGH_RISK_RETRIEVAL_MULTIPLIER = 2
 
+DEFAULT_CHUNKING_CONFIG = {
+    # Generic PDF/DOCX appendix chunking. Keep these in config so other business
+    # cases, such as annual-report or index-methodology analysis, can tune chunk
+    # granularity without editing 04_chunk.py.
+    "min_chars": 2500,
+    "max_chars": 6000,
+    "max_pages": 5,
+    "overlap_pages": 1,
+    # DDQ-specific behavior: use question text for embedding relevance, but keep
+    # final evidence text answer-only. Other workflows can disable this if their
+    # parsed rows do not separate question/answer roles.
+    "include_questions_in_embedding": True,
+    "include_questions_in_chunk_text": False,
+}
+
+DEFAULT_VECTOR_SEARCH_CONFIG = {
+    # Keep Vector Search relevance on embedding_text while downstream prompts use
+    # chunk_text. This matters for DDQ answers because embedding_text can include
+    # the question for relevance, while chunk_text remains evidence-only.
+    "primary_key": "chunk_id",
+    "embedding_source_column": "embedding_text",
+    "exclude_source_roles": ["report_template"],
+    "columns_to_sync": [
+        "engagement_id",
+        "document_id",
+        "file_name",
+        "source_path_dbfs",
+        "page_start",
+        "page_end",
+        "chunk_type",
+        "section_hint",
+        "chunk_index",
+        "source_tier",
+        "legal_entity_hint",
+        "source_role",
+        "section_code",
+        "section_title",
+        "chapter_code",
+        "chapter_title",
+        "question_number",
+        "is_manager_answer_chunk",
+        "has_substantive_answer",
+        "referenced_appendices",
+        "embedding_text",
+    ],
+    "required_metadata_columns": [
+        "source_role",
+        "section_code",
+        "chapter_code",
+        "has_substantive_answer",
+        "referenced_appendices",
+        "embedding_text",
+    ],
+}
+
 SECTION_HEADING_REGEX = r"^([A-Z]\d{4})[\.]?\s+(.+)$"
 QUESTION_NUMBERING_REGEX = r"^\s*(\d{1,3})[\.\)]\s+(.+)"
 APPENDIX_REF_REGEX = r"(?i)\bappendix(?:es)?\s+([A-Za-z0-9,\-\sand]+)"
@@ -121,6 +176,8 @@ WORKFLOW_PROFILES = {
         "source_tier_rules": SOURCE_TIER_RULES,
         "legal_entity_patterns": LEGAL_ENTITY_PATTERNS,
         "doc_short_titles": DOC_SHORT_TITLES,
+        "chunking": DEFAULT_CHUNKING_CONFIG,
+        "vector_search": DEFAULT_VECTOR_SEARCH_CONFIG,
         "default_assessment_model": DEFAULT_ASSESSMENT_MODEL,
         "default_risk_model": DEFAULT_RISK_MODEL,
         "high_risk_topics": [

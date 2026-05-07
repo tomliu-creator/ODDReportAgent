@@ -9,7 +9,7 @@
 # MAGIC %md
 # MAGIC ## 01 Catalog / Schema / Volume / Tables Setup
 # MAGIC
-# MAGIC Idempotently creates the `cmi_agent.ddq_agent` catalog/schema, the `engagements` UC volume,
+# MAGIC Idempotently creates the configured catalog/schema, the `engagements` UC volume,
 # MAGIC the per-engagement folder layout, and the Delta tables used by the ODD workflow.
 
 # COMMAND ----------

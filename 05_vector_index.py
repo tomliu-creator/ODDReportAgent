@@ -27,16 +27,46 @@ import requests
 import time
 
 dbutils.widgets.text("engagement_id", "odd_ssga_2025")
+dbutils.widgets.text("workflow_profile", "odd_report_v1")
 dbutils.widgets.text("vs_endpoint_name", DEFAULT_VS_ENDPOINT)
 dbutils.widgets.text("embedding_model_endpoint_name", DEFAULT_EMBEDDING_MODEL)
 dbutils.widgets.dropdown("pipeline_type", "TRIGGERED", ["TRIGGERED", "CONTINUOUS"])
 
 ENGAGEMENT_ID = dbutils.widgets.get("engagement_id").strip()
+PROFILE = get_workflow_profile(dbutils.widgets.get("workflow_profile").strip() or "odd_report_v1")
 VS_ENDPOINT_NAME = dbutils.widgets.get("vs_endpoint_name").strip() or DEFAULT_VS_ENDPOINT
 VS_INDEX_NAME = vs_index_name(ENGAGEMENT_ID)
 VS_SOURCE_TABLE = vs_source_table_name(ENGAGEMENT_ID)
 EMBEDDING_MODEL_ENDPOINT = dbutils.widgets.get("embedding_model_endpoint_name").strip() or DEFAULT_EMBEDDING_MODEL
 PIPELINE_TYPE = dbutils.widgets.get("pipeline_type").strip().upper()
+VECTOR_SEARCH_CONFIG = PROFILE.get("vector_search", DEFAULT_VECTOR_SEARCH_CONFIG)
+VS_PRIMARY_KEY = VECTOR_SEARCH_CONFIG.get("primary_key", DEFAULT_VECTOR_SEARCH_CONFIG["primary_key"])
+VS_EMBEDDING_SOURCE_COLUMN = VECTOR_SEARCH_CONFIG.get(
+    "embedding_source_column",
+    DEFAULT_VECTOR_SEARCH_CONFIG["embedding_source_column"],
+)
+VS_EXCLUDE_SOURCE_ROLES = list(
+    VECTOR_SEARCH_CONFIG.get(
+        "exclude_source_roles",
+        DEFAULT_VECTOR_SEARCH_CONFIG["exclude_source_roles"],
+    )
+)
+VS_EXCLUDED_SOURCE_ROLES_SQL = ", ".join(f"'{role.replace(chr(39), chr(39) + chr(39))}'" for role in VS_EXCLUDE_SOURCE_ROLES)
+VS_EXCLUDED_SOURCE_ROLES_SQL = VS_EXCLUDED_SOURCE_ROLES_SQL or "''"
+VS_COLUMNS_TO_SYNC = list(
+    VECTOR_SEARCH_CONFIG.get(
+        "columns_to_sync",
+        DEFAULT_VECTOR_SEARCH_CONFIG["columns_to_sync"],
+    )
+)
+VS_REQUIRED_METADATA_COLUMNS = list(
+    VECTOR_SEARCH_CONFIG.get(
+        "required_metadata_columns",
+        DEFAULT_VECTOR_SEARCH_CONFIG["required_metadata_columns"],
+    )
+)
+if VS_EMBEDDING_SOURCE_COLUMN not in VS_COLUMNS_TO_SYNC:
+    VS_COLUMNS_TO_SYNC.append(VS_EMBEDDING_SOURCE_COLUMN)
 
 print("ENGAGEMENT_ID:", ENGAGEMENT_ID)
 print("VS endpoint:", VS_ENDPOINT_NAME)
@@ -44,6 +74,7 @@ print("VS index:", VS_INDEX_NAME)
 print("VS source table:", VS_SOURCE_TABLE)
 print("Embedding model:", EMBEDDING_MODEL_ENDPOINT)
 print("Pipeline type:", PIPELINE_TYPE)
+print("Vector Search config:", VECTOR_SEARCH_CONFIG)
 
 
 def _workspace_host() -> str:
@@ -121,7 +152,7 @@ chunk_count = (
     spark.table(CHUNKS_TABLE)
     .filter(F.col("engagement_id") == ENGAGEMENT_ID)
     .filter(F.col("source_role").isNotNull())
-    .filter(F.col("source_role") != "report_template")
+    .filter(~F.col("source_role").isin(VS_EXCLUDE_SOURCE_ROLES))
     .count()
 )
 print("Chunks for engagement:", chunk_count)
@@ -146,7 +177,7 @@ SELECT *
 FROM {CHUNKS_TABLE}
 WHERE engagement_id = '{ENGAGEMENT_ID}'
   AND source_role IS NOT NULL
-  AND coalesce(source_role, '') <> 'report_template'
+  AND NOT source_role IN ({VS_EXCLUDED_SOURCE_ROLES_SQL})
 """)
 
 vs_source_count = spark.table(VS_SOURCE_TABLE).count()
@@ -184,29 +215,7 @@ else:
 
 # COMMAND ----------
 
-columns_to_sync = [
-    "engagement_id",
-    "document_id",
-    "file_name",
-    "source_path_dbfs",
-    "page_start",
-    "page_end",
-    "chunk_type",
-    "section_hint",
-    "chunk_index",
-    "source_tier",
-    "legal_entity_hint",
-    "source_role",
-    "section_code",
-    "section_title",
-    "chapter_code",
-    "chapter_title",
-    "question_number",
-    "is_manager_answer_chunk",
-    "has_substantive_answer",
-    "referenced_appendices",
-    "embedding_text",
-]
+columns_to_sync = VS_COLUMNS_TO_SYNC
 
 
 def _index_has_expected_metadata_columns(index_handle, expected_columns: list[str]) -> bool | None:
@@ -272,13 +281,12 @@ if not vsc.index_exists(endpoint_name=VS_ENDPOINT_NAME, index_name=VS_INDEX_NAME
             vsc.create_delta_sync_index_and_wait(
                 endpoint_name=VS_ENDPOINT_NAME,
                 index_name=VS_INDEX_NAME,
-                primary_key="chunk_id",
+                primary_key=VS_PRIMARY_KEY,
                 source_table_name=VS_SOURCE_TABLE,
                 pipeline_type=PIPELINE_TYPE,
-                # Use embedding_text for relevance matching. For manager-completed DDQ chunks this
-                # includes the original DDQ question plus the manager answer; downstream prompts
-                # still use chunk_text, which excludes question wording and contains evidence only.
-                embedding_source_column="embedding_text",
+                # Configurable in _config.py. The ODD default uses embedding_text for
+                # relevance matching while downstream prompts cite chunk_text.
+                embedding_source_column=VS_EMBEDDING_SOURCE_COLUMN,
                 embedding_model_endpoint_name=EMBEDDING_MODEL_ENDPOINT,
                 columns_to_sync=columns_to_sync,
             )
@@ -302,11 +310,11 @@ else:
 
 index = vsc.get_index(endpoint_name=VS_ENDPOINT_NAME, index_name=VS_INDEX_NAME)
 uses_expected_embedding = _index_uses_expected_embedding_endpoint(index, EMBEDDING_MODEL_ENDPOINT)
-uses_expected_embedding_source = _index_uses_expected_embedding_source(index, "embedding_text")
+uses_expected_embedding_source = _index_uses_expected_embedding_source(index, VS_EMBEDDING_SOURCE_COLUMN)
 if uses_expected_embedding is False or uses_expected_embedding_source is False:
     print(
         f"Existing index '{VS_INDEX_NAME}' was built with a different embedding configuration. "
-        "Deleting and recreating it so Vector Search embeds embedding_text while prompts use answer-only chunk_text."
+        f"Deleting and recreating it so Vector Search embeds {VS_EMBEDDING_SOURCE_COLUMN}."
     )
     _delete_index(VS_ENDPOINT_NAME, VS_INDEX_NAME)
     created_index = False
@@ -315,11 +323,11 @@ if uses_expected_embedding is False or uses_expected_embedding_source is False:
     vsc.create_delta_sync_index_and_wait(
         endpoint_name=VS_ENDPOINT_NAME,
         index_name=VS_INDEX_NAME,
-        primary_key="chunk_id",
+        primary_key=VS_PRIMARY_KEY,
         source_table_name=VS_SOURCE_TABLE,
         pipeline_type=PIPELINE_TYPE,
-        # Keep Vector Search relevance on embedding_text while assessment evidence remains chunk_text.
-        embedding_source_column="embedding_text",
+        # Configurable in _config.py.
+        embedding_source_column=VS_EMBEDDING_SOURCE_COLUMN,
         embedding_model_endpoint_name=EMBEDDING_MODEL_ENDPOINT,
         columns_to_sync=columns_to_sync,
     )
@@ -328,7 +336,7 @@ if uses_expected_embedding is False or uses_expected_embedding_source is False:
 
 has_expected_columns = _index_has_expected_metadata_columns(
     index,
-    ["source_role", "section_code", "chapter_code", "has_substantive_answer", "referenced_appendices", "embedding_text"],
+    VS_REQUIRED_METADATA_COLUMNS,
 )
 if has_expected_columns is False:
     raise RuntimeError(
@@ -370,14 +378,14 @@ WHERE engagement_id = '{ENGAGEMENT_ID}'
 spark.sql(f"""
 UPDATE {DOCUMENTS_TABLE}
 SET index_status = CASE
-      WHEN source_role = 'report_template' THEN index_status
+      WHEN source_role IN ({VS_EXCLUDED_SOURCE_ROLES_SQL}) THEN index_status
       ELSE 'done'
     END,
     index_ts = current_timestamp()
 WHERE engagement_id = '{ENGAGEMENT_ID}'
   AND (
       (parse_status = 'done' AND chunk_status = 'done')
-      OR source_role = 'report_template'
+      OR source_role IN ({VS_EXCLUDED_SOURCE_ROLES_SQL})
   )
 """)
 

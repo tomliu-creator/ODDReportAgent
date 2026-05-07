@@ -83,6 +83,22 @@ risk_def_text = "\n".join(f"- {r['rating_label']}: {r['rating_definition']}" for
 
 print("RETRIEVAL_MODE:", RETRIEVAL_MODE)
 
+appendix_source_titles = [
+    r["file_name"]
+    for r in (
+        spark.table(DOCUMENTS_TABLE)
+        .filter(
+            (F.col("engagement_id") == ENGAGEMENT_ID)
+            & (F.col("source_role") == "appendix")
+            & (F.col("is_present") == True)
+        )
+        .select("file_name")
+        .distinct()
+        .orderBy("file_name")
+        .collect()
+    )
+]
+
 vsc = None
 index = None
 if RETRIEVAL_MODE == "python":
@@ -197,13 +213,74 @@ def _appendix_query_terms(chunk_rows: list[dict]) -> list[str]:
 
 
 def _topic_query_text(topic: dict) -> str:
+    prompt_text = normalize_text(topic.get("topic_prompt"))
     parts = [
         topic.get("section_code"),
         topic.get("topic_title"),
         topic.get("chapter_title"),
-        topic.get("topic_prompt"),
+        prompt_text,
     ]
+    prompt_source_titles = _source_titles_referenced_by_prompt(prompt_text)
+    if prompt_source_titles:
+        # Generic prompt-to-source-title bridge: when ODDAgent.md says to check e.g.
+        # "annual report" or "SOC 1", include matching appendix filenames in the query.
+        # This is not an A0300 keyword taxonomy; it keeps retrieval driven by the topic
+        # prompt plus document metadata so relevant fact pages are not beaten by generic
+        # risk/certification pages from the same source family.
+        parts.extend(prompt_source_titles)
     return " ".join(normalize_text(part) for part in parts if normalize_text(part)).strip()
+
+
+def _source_titles_referenced_by_prompt(prompt_text: str) -> list[str]:
+    if not prompt_text:
+        return []
+
+    stopwords = {
+        "appendix",
+        "report",
+        "reports",
+        "statement",
+        "statements",
+        "evidence",
+        "latest",
+        "always",
+        "check",
+        "only",
+        "from",
+        "with",
+        "and",
+        "the",
+        "for",
+        "that",
+        "this",
+    }
+    prompt_tokens = re.findall(r"[a-z0-9]+", prompt_text.lower())
+    prompt_words = {
+        word
+        for word in prompt_tokens
+        if len(word) > 2 and word not in stopwords
+    }
+    prompt_phrases = {
+        " ".join(prompt_tokens[i : i + n])
+        for n in (2, 3)
+        for i in range(0, max(0, len(prompt_tokens) - n + 1))
+    }
+
+    matched = []
+    for title in appendix_source_titles:
+        title_l = title.lower()
+        title_norm = " ".join(re.findall(r"[a-z0-9]+", title_l))
+        title_words = {
+            word
+            for word in re.findall(r"[a-z0-9]+", title_l)
+            if len(word) > 2 and word not in stopwords
+        }
+        shared_words = prompt_words & title_words
+        phrase_hit = any(phrase in title_norm for phrase in prompt_phrases)
+        if phrase_hit or len(shared_words) >= 2:
+            matched.append(title)
+
+    return matched[:3]
 
 
 def _mandatory_source_hits(topic: dict) -> list[dict]:
@@ -213,10 +290,13 @@ def _mandatory_source_hits(topic: dict) -> list[dict]:
     # Generic topic-prompt path: if ODDAgent.md gives a topic-specific instruction, search
     # appendices with that same prompt text instead of hard-coding behavior for one section.
     # This keeps source expansion driven by the runtime behavior spec.
+    # Keep this candidate pool deliberately wider than final_evidence_k. Some annual-report
+    # fact pages are semantically close but can rank behind risk-factor or certification pages;
+    # the reranker needs to see enough prompt-driven appendix candidates to reject those decoys.
     return _search(
         _topic_query_text(topic),
         {"engagement_id": ENGAGEMENT_ID, "source_role": "appendix"},
-        max(4, FINAL_EVIDENCE_K),
+        max(TOP_K * 2, FINAL_EVIDENCE_K * 3, 24),
     )
 
 
@@ -284,6 +364,33 @@ candidate_map = {}
 for topic in topics:
     candidate_map[topic["topic_id"]] = _retrieve_for_topic(topic)
 
+
+def _items_for_rerank(items: list[dict]) -> list[dict]:
+    """Keep reranking balanced so appendices are not starved by tier-0 DDQ hits."""
+    max_per_bucket = max(TOP_K, FINAL_EVIDENCE_K * 2)
+    max_total = max(TOP_K * 3, FINAL_EVIDENCE_K * 4, 32)
+    selected = []
+    seen = set()
+
+    for bucket_name in ("section", "appendix", "mandatory_external"):
+        bucket_items = [item for item in items if item.get("bucket") == bucket_name]
+        for item in bucket_items[:max_per_bucket]:
+            cid = item.get("chunk_id")
+            if cid and cid not in seen:
+                selected.append(item)
+                seen.add(cid)
+
+    for item in items:
+        cid = item.get("chunk_id")
+        if cid and cid not in seen:
+            selected.append(item)
+            seen.add(cid)
+        if len(selected) >= max_total:
+            break
+
+    return selected[:max_total]
+
+
 all_chunk_ids = sorted({
     item["chunk_id"]
     for items, _fallback in candidate_map.values()
@@ -305,7 +412,7 @@ chunk_by_id = {
 rerank_rows = []
 for topic in topics:
     items, _fallback = candidate_map[topic["topic_id"]]
-    for item in items[: max(TOP_K, FINAL_EVIDENCE_K * 2)]:
+    for item in _items_for_rerank(items):
         chunk = chunk_by_id.get(item["chunk_id"])
         if not chunk:
             continue
@@ -500,8 +607,10 @@ SELECT topic_id, ai_query('{RISK_MODEL_NAME}', prompt) AS risk_raw
 FROM odd_risk_prompts
 """)
 
-assessment_payloads = {r["topic_id"]: parse_json_payload(r["assessment_raw"], default={}) or {} for r in df_assessment_raw.collect()}
-risk_payloads = {r["topic_id"]: parse_json_payload(r["risk_raw"], default={}) or {} for r in df_risk_raw.collect()}
+assessment_raws = {r["topic_id"]: r["assessment_raw"] for r in df_assessment_raw.collect()}
+risk_raws = {r["topic_id"]: r["risk_raw"] for r in df_risk_raw.collect()}
+assessment_payloads = {topic_id: parse_json_payload(raw, default={}) or {} for topic_id, raw in assessment_raws.items()}
+risk_payloads = {topic_id: parse_json_payload(raw, default={}) or {} for topic_id, raw in risk_raws.items()}
 
 assessment_rows = []
 for topic in topics:
@@ -509,7 +618,16 @@ for topic in topics:
     assessment_payload = assessment_payloads.get(topic_id, {})
     risk_payload = risk_payloads.get(topic_id, {})
     evidence = evidence_by_topic[topic_id]
-    assessment_text = normalize_text(assessment_payload.get("assessment_text") or "")
+    assessment_text = normalize_text(
+        assessment_payload.get("assessment_text")
+        or assessment_payload.get("assessment")
+        or assessment_payload.get("text")
+        or ""
+    )
+    if not assessment_text:
+        # Avoid silent blank report sections when a model returns prose or an unexpected
+        # JSON key despite the prompt. Keep the raw response visible for review instead.
+        assessment_text = normalize_text(assessment_raws.get(topic_id) or "")
     confidence = assessment_payload.get("confidence")
     try:
         confidence = float(confidence)

@@ -13,6 +13,12 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 # MAGIC %md
+# MAGIC **Legacy Notebook**
+# MAGIC
+# MAGIC The default ODD workflow now loads runtime behavior from `ODDAgent.md` via
+# MAGIC `06_load_odd_agent_spec.py`. Keep this notebook only as a reference for the older
+# MAGIC template-parsing approach.
+# MAGIC
 # MAGIC ## 06 Parse the ODD report template into structured topic metadata
 
 # COMMAND ----------

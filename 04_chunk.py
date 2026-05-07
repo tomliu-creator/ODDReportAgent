@@ -21,10 +21,25 @@ dbutils.widgets.text("workflow_profile", "odd_report_v1")
 ENGAGEMENT_ID = dbutils.widgets.get("engagement_id").strip()
 PROFILE = get_workflow_profile(dbutils.widgets.get("workflow_profile").strip() or "odd_report_v1")
 
-MIN_CHARS = 2500
-MAX_CHARS = 6000
-MAX_PAGES = 5
-OVERLAP_PAGES = 1
+CHUNKING_CONFIG = PROFILE.get("chunking", DEFAULT_CHUNKING_CONFIG)
+MIN_CHARS = int(CHUNKING_CONFIG.get("min_chars", DEFAULT_CHUNKING_CONFIG["min_chars"]))
+MAX_CHARS = int(CHUNKING_CONFIG.get("max_chars", DEFAULT_CHUNKING_CONFIG["max_chars"]))
+MAX_PAGES = int(CHUNKING_CONFIG.get("max_pages", DEFAULT_CHUNKING_CONFIG["max_pages"]))
+OVERLAP_PAGES = int(CHUNKING_CONFIG.get("overlap_pages", DEFAULT_CHUNKING_CONFIG["overlap_pages"]))
+INCLUDE_QUESTIONS_IN_EMBEDDING = bool(
+    CHUNKING_CONFIG.get(
+        "include_questions_in_embedding",
+        DEFAULT_CHUNKING_CONFIG["include_questions_in_embedding"],
+    )
+)
+INCLUDE_QUESTIONS_IN_CHUNK_TEXT = bool(
+    CHUNKING_CONFIG.get(
+        "include_questions_in_chunk_text",
+        DEFAULT_CHUNKING_CONFIG["include_questions_in_chunk_text"],
+    )
+)
+
+print("Chunking config:", CHUNKING_CONFIG)
 
 
 def _pick_section_hint(text: str) -> str | None:
@@ -163,11 +178,13 @@ def _build_manager_ddq_chunks(rows: list[dict], source_tier: int) -> list[dict]:
                     prefix = f"{section_code}. {section_title}"
                     embedding_prefix = prefix
                 elif row.get("content_role") == "question":
-                    # Keep question text out of evidence chunks. The parser stores
-                    # questions separately, and retrieval should assess the
-                    # manager's answers rather than restating the questionnaire.
-                    prefix = ""
-                    embedding_prefix = f"Question {row.get('question_number')}: {row.get('page_text')}"
+                    # Configurable split: for the ODD workflow, question text is kept
+                    # in embedding_text for relevance, but out of chunk_text so the
+                    # assessment cites the manager's answer rather than restating the
+                    # questionnaire. Other workflows can change this in _config.py.
+                    question_text = f"Question {row.get('question_number')}: {row.get('page_text')}"
+                    prefix = question_text if INCLUDE_QUESTIONS_IN_CHUNK_TEXT else ""
+                    embedding_prefix = question_text if INCLUDE_QUESTIONS_IN_EMBEDDING else prefix
                 else:
                     prefix = row.get("page_text") or ""
                     embedding_prefix = prefix

@@ -14,6 +14,12 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 # MAGIC %md
+# MAGIC **Legacy Notebook**
+# MAGIC
+# MAGIC This notebook belongs to the deprecated DDQ-fill workflow. The default orchestrated path for
+# MAGIC this repository is now the ODD report workflow (`06_parse_odd_report` -> `07_assess_odd_report`
+# MAGIC -> `08_fill_odd_report`).
+# MAGIC
 # MAGIC ## 08 Fill the source `.docx` with draft answers + inline citations
 # MAGIC
 # MAGIC Walks `doc.paragraphs` and for each row in `ddq_questions` (excluding `skipped_table`)
