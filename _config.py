@@ -5,9 +5,10 @@
 # COMMAND ----------
 
 # Core UC locations for the ODD assessment agent.
-CATALOG = "rag_agent"
+CATALOG = "uc_cmifi_dev"
 SCHEMA = "ddq_agent"
 VOLUME = "engagements"
+ENGAGEMENT_ID = "odd_ssga_2025"  # Default engagement ID
 
 # Shared storage tables.
 DOCUMENTS_TABLE = f"{CATALOG}.{SCHEMA}.documents"

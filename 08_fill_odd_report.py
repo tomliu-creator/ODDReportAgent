@@ -166,23 +166,27 @@ out_basename = metadata["report_template_name"].rsplit(".docx", 1)[0] + ".filled
 out_local = os.path.join(out_dir_local, out_basename)
 out_dbfs = f"{paths['output_dbfs']}/{out_basename}"
 out_dbfs_local = out_dbfs.replace("dbfs:", "/dbfs")
-workspace_output_dir = "/Workspace/Users/tomliushopping@gmail.com/notebooks_ddq/output_docs"
+workspace_output_dir = paths['output_local']
 os.makedirs(workspace_output_dir, exist_ok=True)
 out_workspace_local = os.path.join(workspace_output_dir, out_basename)
 
-workspace_tmp_dir = "/Workspace/Users/tomliushopping@gmail.com/notebooks_ddq/.tmp"
-os.makedirs(workspace_tmp_dir, exist_ok=True)
-tmp_out_local = os.path.join(workspace_tmp_dir, f"{uuid.uuid4().hex}.docx")
+# Save to local /tmp first (Volume paths don't support all file operations needed by python-docx)
+import tempfile
+tmp_out_local = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4().hex}.docx")
 doc.save(tmp_out_local)
 
 final_output_path = out_dbfs
 try:
-    shutil.copyfile(tmp_out_local, out_dbfs_local)
-except OSError as e:
     shutil.copyfile(tmp_out_local, out_workspace_local)
     final_output_path = out_workspace_local
-    print(f"WARNING: could not write to volume output path ({out_dbfs_local}): {e}")
-    print("Fell back to workspace-local output path.")
+    print(f"Saved to: {final_output_path}")
+except OSError as e:
+    print(f"ERROR: could not write to output path ({out_workspace_local}): {e}")
+    raise
+finally:
+    # Clean up temp file
+    if os.path.exists(tmp_out_local):
+        os.remove(tmp_out_local)
 
-print("Saved:", final_output_path)
+print("Final output:", final_output_path)
 show_validation_snapshot(CATALOG, SCHEMA, ENGAGEMENT_ID)

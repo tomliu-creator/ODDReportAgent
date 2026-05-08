@@ -61,6 +61,13 @@ if WORKFLOW_MODE != "odd_report":
         "The default supported run path is the ODD report workflow."
     )
 
+# Construct agent spec path relative to engagement folder
+if not AGENT_SPEC_PATH or AGENT_SPEC_PATH == "ODDAgent.md":
+    AGENT_SPEC_PATH = f"{VOLUME_FUSE_ROOT}/{ENGAGEMENT_ID}/ODDAgent.md"
+    print(f"Using default agent spec path: {AGENT_SPEC_PATH}")
+else:
+    print(f"Using custom agent spec path: {AGENT_SPEC_PATH}")
+
 # COMMAND ----------
 
 r = dbutils.notebook.run("./01_setup", DEFAULT_TIMEOUT_SEC, {"engagement_id": ENGAGEMENT_ID})
