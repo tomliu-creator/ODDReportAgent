@@ -158,6 +158,16 @@ def _tier_priority(value) -> int:
     return 0 if tier == 0 else 1 if tier <= 2 else 2
 
 
+def _topic_code(topic: dict) -> str:
+    return normalize_text(topic.get("section_code"))
+
+
+def _topic_label(topic: dict) -> str:
+    code = _topic_code(topic)
+    title = normalize_text(topic.get("topic_title"))
+    return f"{code} {title}".strip() or normalize_text(topic.get("topic_id")) or "Unlabeled topic"
+
+
 def _search(query_text: str, filters: dict, num_results: int) -> list[dict]:
     if RETRIEVAL_MODE == "python":
         # Client-side path retained intentionally. Some workspaces need it for debugging or legacy behavior.
@@ -195,6 +205,23 @@ def _search(query_text: str, filters: dict, num_results: int) -> list[dict]:
             df = df.filter(F.col(key) == F.lit(value))
     filtered_df = df.select(*[c for c in vs_cols if c in df.columns])
     return [r.asDict() for r in filtered_df.limit(int(num_results)).collect()]
+
+
+def _search_many(query_text: str, filter_list: list[dict], num_results: int) -> list[dict]:
+    combined = []
+    seen = set()
+    per_filter_k = max(num_results, FINAL_EVIDENCE_K * 2)
+    for filters in filter_list:
+        for hit in _search(query_text, filters, per_filter_k):
+            cid = hit.get("chunk_id")
+            if not cid or cid in seen:
+                continue
+            combined.append(hit)
+            seen.add(cid)
+    return sorted(
+        combined,
+        key=lambda hit: (_tier_priority(hit.get("source_tier")), _safe_int(hit.get("source_tier"), 5), hit.get("chunk_id") or ""),
+    )[:num_results]
 
 
 def _appendix_query_terms(chunk_rows: list[dict]) -> list[str]:
@@ -300,14 +327,57 @@ def _mandatory_source_hits(topic: dict) -> list[dict]:
     )
 
 
+def _source_role_filters(*roles: str) -> list[dict]:
+    return [
+        {"engagement_id": ENGAGEMENT_ID, "source_role": role}
+        for role in roles
+    ]
+
+
+def _semantic_primary_hits(topic: dict) -> list[dict]:
+    # For report sources without DDQ-style section codes, use the topic title and
+    # prompt as the join key. Keep manager-completed DDQs first when present, but
+    # allow narrative/policy/public sources to satisfy the topic directly.
+    source_roles = [
+        "manager_completed_ddq",
+        "appendix",
+        "policy",
+        "assurance_report",
+        "public_disclosure",
+        "other",
+    ]
+    return _search_many(
+        _topic_query_text(topic),
+        _source_role_filters(*source_roles),
+        max(TOP_K * 2, FINAL_EVIDENCE_K * 3, 24),
+    )
+
+
 def _retrieve_for_topic(topic: dict) -> tuple[list[dict], bool]:
     base_query = _topic_query_text(topic)
-    section_hits = _search(
-        base_query,
-        {"engagement_id": ENGAGEMENT_ID, "source_role": "manager_completed_ddq", "section_code": topic["section_code"]},
-        max(TOP_K, FINAL_EVIDENCE_K * 2),
-    )
-    section_substantive = any(bool(hit.get("has_substantive_answer")) for hit in section_hits)
+    section_code = _topic_code(topic)
+    fallback_used = False
+
+    if section_code:
+        section_hits = _search(
+            base_query,
+            {"engagement_id": ENGAGEMENT_ID, "source_role": "manager_completed_ddq", "section_code": section_code},
+            max(TOP_K, FINAL_EVIDENCE_K * 2),
+        )
+        section_substantive = any(bool(hit.get("has_substantive_answer")) for hit in section_hits)
+        if not section_hits or not section_substantive:
+            fallback_used = True
+            section_hits = _search(
+                base_query,
+                {"engagement_id": ENGAGEMENT_ID, "source_role": "manager_completed_ddq"},
+                max(TOP_K, FINAL_EVIDENCE_K * 2),
+            )
+        primary_bucket = "section"
+    else:
+        fallback_used = True
+        section_hits = _semantic_primary_hits(topic)
+        primary_bucket = "semantic_primary"
+
     appendix_terms = _appendix_query_terms(section_hits)
 
     appendix_query = base_query
@@ -320,18 +390,8 @@ def _retrieve_for_topic(topic: dict) -> tuple[list[dict], bool]:
     )
     mandatory_hits = _mandatory_source_hits(topic)
 
-    fallback_used = False
-    if not section_hits or not section_substantive:
-        fallback_used = True
-        global_ddq_hits = _search(
-            base_query,
-            {"engagement_id": ENGAGEMENT_ID, "source_role": "manager_completed_ddq"},
-            max(TOP_K, FINAL_EVIDENCE_K * 2),
-        )
-        section_hits = global_ddq_hits
-
     combined = []
-    for bucket_name, hits in (("section", section_hits), ("appendix", appendix_hits), ("mandatory_external", mandatory_hits)):
+    for bucket_name, hits in ((primary_bucket, section_hits), ("appendix", appendix_hits), ("mandatory_external", mandatory_hits)):
         for rank, hit in enumerate(hits, start=1):
             cid = hit.get("chunk_id")
             if not cid:
@@ -346,17 +406,17 @@ def _retrieve_for_topic(topic: dict) -> tuple[list[dict], bool]:
     for item in combined:
         cid = item["chunk_id"]
         incumbent = deduped.get(cid)
-        candidate_key = (_tier_priority(item.get("source_tier")), item["bucket"] != "section", item["initial_rank"])
+        candidate_key = (_tier_priority(item.get("source_tier")), item["bucket"] not in {"section", "semantic_primary"}, item["initial_rank"])
         if incumbent is None:
             deduped[cid] = item
             continue
-        incumbent_key = (_tier_priority(incumbent.get("source_tier")), incumbent["bucket"] != "section", incumbent["initial_rank"])
+        incumbent_key = (_tier_priority(incumbent.get("source_tier")), incumbent["bucket"] not in {"section", "semantic_primary"}, incumbent["initial_rank"])
         if candidate_key < incumbent_key:
             deduped[cid] = item
 
     return sorted(
         deduped.values(),
-        key=lambda item: (_tier_priority(item.get("source_tier")), item["bucket"] != "section", item["initial_rank"], item["chunk_id"]),
+        key=lambda item: (_tier_priority(item.get("source_tier")), item["bucket"] not in {"section", "semantic_primary"}, item["initial_rank"], item["chunk_id"]),
     ), fallback_used
 
 
@@ -372,7 +432,7 @@ def _items_for_rerank(items: list[dict]) -> list[dict]:
     selected = []
     seen = set()
 
-    for bucket_name in ("section", "appendix", "mandatory_external"):
+    for bucket_name in ("section", "semantic_primary", "appendix", "mandatory_external"):
         bucket_items = [item for item in items if item.get("bucket") == bucket_name]
         for item in bucket_items[:max_per_bucket]:
             cid = item.get("chunk_id")
@@ -419,7 +479,7 @@ for topic in topics:
         preview = (chunk.get("chunk_text") or "")[:2200]
         rerank_prompt = (
             "You are checking retrieval relevance for an ODD report topic.\n"
-            f"TOPIC: {topic['section_code']} {topic['topic_title']}\n"
+            f"TOPIC: {_topic_label(topic)}\n"
             f"CHAPTER: {topic['chapter_title']}\n\n"
             + (f"TOPIC-SPECIFIC MUST-COVER SCOPE:\n{topic.get('topic_prompt')}\n\n" if normalize_text(topic.get("topic_prompt")) else "")
             +
@@ -500,7 +560,7 @@ def _select_evidence(topic: dict) -> tuple[list[str], list[dict], bool]:
     items, fallback_used = candidate_map[topic["topic_id"]]
     scored = sorted(
         rerank_by_topic.get(topic["topic_id"], []),
-        key=lambda item: (-item["rerank_score"], _tier_priority(item["source_tier"]), item["bucket"] != "section", item["initial_rank"]),
+        key=lambda item: (-item["rerank_score"], _tier_priority(item["source_tier"]), item["bucket"] not in {"section", "semantic_primary"}, item["initial_rank"]),
     )
     kept = [item for item in scored if item["rerank_label"] in {"yes", "partial"}][:FINAL_EVIDENCE_K]
     if not kept:
@@ -560,7 +620,7 @@ for topic in topics:
     assessment_prompt = (
         "You are writing a formal operational due diligence report section.\n"
         f"AGENT BEHAVIOR SPEC:\n{metadata['prompt_text']}\n\n"
-        f"TOPIC: {topic['section_code']} {topic['topic_title']}\n"
+        f"TOPIC: {_topic_label(topic)}\n"
         f"CHAPTER: {topic['chapter_title']}\n"
         f"MANDATE: {metadata.get('mandate_name') or ''}\n"
         f"MANAGER: {metadata.get('manager_name') or ''}\n\n"
@@ -582,7 +642,7 @@ for topic in topics:
 
     risk_prompt = (
         "You are assigning a risk rating for one ODD topic.\n"
-        f"TOPIC: {topic['section_code']} {topic['topic_title']}\n"
+        f"TOPIC: {_topic_label(topic)}\n"
         f"RISK DEFINITIONS:\n{risk_def_text}\n\n"
         "Use the evidence below and choose exactly one rating.\n"
         "Return valid JSON only with keys `risk_rating` and `risk_rationale`.\n\n"
