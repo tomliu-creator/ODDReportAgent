@@ -18,8 +18,10 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 import os
+import re
 import shutil
 import uuid
+from datetime import datetime
 from docx import Document
 
 dbutils.widgets.text("engagement_id", "odd_ssga_2025")
@@ -28,6 +30,13 @@ ENGAGEMENT_ID = dbutils.widgets.get("engagement_id").strip()
 paths = engagement_paths(ENGAGEMENT_ID)
 out_dir_local = paths["output_local"]
 os.makedirs(out_dir_local, exist_ok=True)
+
+
+def _current_workspace_dir() -> str:
+    notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+    if notebook_path.startswith("/"):
+        notebook_path = "/Workspace" + notebook_path
+    return os.path.dirname(notebook_path)
 
 metadata_rows = (
     spark.table(ODD_REPORT_METADATA_TABLE)
@@ -108,14 +117,22 @@ def _fill_metadata_table():
             row.cells[1].text = replacements[label]
 
 
+def _format_assessment_text(text: str | None) -> str:
+    formatted = text or ""
+    formatted = re.sub(r"\*\*(.+?)\*\*", r'"\1"', formatted)
+    return formatted
+
+
 def _assessment_block(assessment: dict) -> str:
-    parts = [
-        f"Risk rating: {assessment.get('risk_rating') or 'Medium'}",
-    ]
+    parts = [f"Risk rating: {assessment.get('risk_rating') or 'Medium'}"]
     if normalize_text(assessment.get("risk_rationale")):
         parts.append(f"Risk rationale: {normalize_text(assessment['risk_rationale'])}")
-    parts.append(normalize_text(assessment.get("assessment_text")))
-    return "\n\n".join([part for part in parts if part])
+    assessment_text = _format_assessment_text(assessment.get("assessment_text"))
+    if normalize_text(assessment_text):
+        # Use an empty block so the DOCX writer creates a blank paragraph between
+        # the structured risk rationale and the narrative assessment.
+        parts.extend(["", assessment_text])
+    return "\n\n".join([part for part in parts if part or part == ""])
 
 
 def _fill_part1_table():
@@ -162,7 +179,8 @@ _fill_metadata_table()
 _fill_part1_table()
 _fill_part2_table_and_append_summaries()
 
-out_basename = metadata["report_template_name"].rsplit(".docx", 1)[0] + ".filled.docx"
+timestamp_suffix = datetime.now().strftime("%y%m%d%H%M")
+out_basename = metadata["report_template_name"].rsplit(".docx", 1)[0] + f".{timestamp_suffix}.filled.docx"
 out_local = os.path.join(out_dir_local, out_basename)
 out_dbfs = f"{paths['output_dbfs']}/{out_basename}"
 out_dbfs_local = out_dbfs.replace("dbfs:", "/dbfs")
@@ -177,10 +195,13 @@ doc.save(tmp_out_local)
 
 final_output_path = out_dbfs
 try:
-    shutil.copyfile(tmp_out_local, out_workspace_local)
+    with open(tmp_out_local, "rb") as src, open(out_workspace_local, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    if not os.path.exists(out_workspace_local) or os.path.getsize(out_workspace_local) == 0:
+        raise RuntimeError(f"Output file was not created or is empty: {out_workspace_local}")
     final_output_path = out_workspace_local
     print(f"Saved to: {final_output_path}")
-except OSError as e:
+except Exception as e:
     print(f"ERROR: could not write to output path ({out_workspace_local}): {e}")
     raise
 finally:
@@ -190,3 +211,4 @@ finally:
 
 print("Final output:", final_output_path)
 show_validation_snapshot(CATALOG, SCHEMA, ENGAGEMENT_ID)
+dbutils.notebook.exit(final_output_path)

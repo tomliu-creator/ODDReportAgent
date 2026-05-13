@@ -5,7 +5,7 @@
 # COMMAND ----------
 
 # Core UC locations for the ODD assessment agent.
-CATALOG = "uc_cmifi_dev"
+CATALOG = "rag_agent"
 SCHEMA = "ddq_agent"
 VOLUME = "engagements"
 ENGAGEMENT_ID = "odd_ssga_2025"  # Default engagement ID
