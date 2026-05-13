@@ -78,20 +78,27 @@ because they constrain every later choice.
    topic's `Prompt:` line. `07_assess_odd_report.py` injects `topic_prompt` into
    the retrieval query and into the assessment prompt. Behavior changes are
    spec changes, not code changes.
-9. **Two enforcement layers against question-text leakage.** The physical
+9. **Unified provenance contract across parsed rows and chunks.** The pipeline
+   carries generic locator fields across document types:
+   `source_page_num`, `source_para_num`, `source_locator_type`,
+   `source_locator_label` on parsed rows, plus `source_page_start`,
+   `source_page_end`, `source_para_start`, `source_para_end` on chunks. This
+   keeps retrieval and citation logic generic even when different source
+   formats expose different locator fidelity.
+10. **Two enforcement layers against question-text leakage.** The physical
    layer is the `chunk_text` / `embedding_text` split — the LLM literally
    cannot see question wording as evidence because it isn't in the column.
    The prompt layer encodes the principle in every assessment prompt: the
    model is instructed to prioritize manager DDQ evidence when substantive,
    to use appendices only to support or challenge it, and to state limitations
    rather than infer when evidence is thin.
-10. **Human-review flagging replaces automated claim verification (today).**
+11. **Human-review flagging replaces automated claim verification (today).**
     After assessment generation, each topic gets a `human_review_flag`:
     `"high"` when fallback retrieval was used or the risk rating is High /
     Unacceptable; `"medium"` when model confidence < 0.7; `"low"` otherwise.
     A full per-claim verifier (v2 design §1.8) is **not yet implemented** and
     is an open improvement path.
-11. **Structured table extraction is aspirational (not yet implemented).**
+12. **Structured table extraction is aspirational (not yet implemented).**
     DDQ answer tables (key-personnel, committee membership, fee schedules) are
     currently parsed only as flat paragraph text. Preserving them as structured
     `{columns, rows}` objects is planned but requires a code change to
@@ -117,7 +124,7 @@ All under catalog/schema **`uc_cmifi_dev.ddq_agent`** (configurable in
 | Table | Purpose |
 |---|---|
 | `documents` | One row per input file. Carries `source_role`, `source_tier`, `parse_status`, `chunk_status`, `index_status`, plus mandate/manager metadata. |
-| `document_pages` | Page-level (or section-level for DOCX) parsed text. |
+| `document_pages` | Parsed source rows with unified provenance fields. For PDFs this is page-level text; for DOCX this is currently paragraph-level text with generic locator metadata. |
 | `document_chunks` | Chunked evidence with full metadata (see §3.4). Contains both `chunk_text` (evidence-only) and `embedding_text` (includes DDQ question wording for relevance). |
 | `pipeline_errors` | Per-stage error log. |
 | `odd_report_metadata` | Engagement metadata extracted from the report template's first table (mandate, manager, strategy, dates, authors). |
@@ -125,6 +132,12 @@ All under catalog/schema **`uc_cmifi_dev.ddq_agent`** (configurable in
 | `odd_report_risk_definitions` | Rating scale extracted from the template. |
 | `odd_topic_assessments` | The agent's output: `assessment_text`, `risk_rating`, `risk_rationale`, `citations`, `retrieved_chunk_ids`, `source_tiers_used`, `manager_ddq_used`, `appendices_used`, `fallback_used`, `assessment_model`, `risk_model`. |
 | `odd_chapter_summaries` | Part 2 rollups: chapter A–D summaries + overall conclusion. |
+
+`document_pages` and `document_chunks` now share a unified provenance contract.
+Parsed rows carry `source_page_num`, `source_para_num`, `source_locator_type`,
+and `source_locator_label`; chunks carry the corresponding range fields
+`source_page_start`, `source_page_end`, `source_para_start`,
+`source_para_end`, plus `source_locator_type` and `source_locator_label`.
 
 ### 2.3 Vector Search
 
@@ -140,7 +153,9 @@ All under catalog/schema **`uc_cmifi_dev.ddq_agent`** (configurable in
   `file_name`, `source_path_dbfs`, `page_start`, `page_end`, `source_role`,
   `source_tier`, `section_code`, `section_title`, `chapter_code`,
   `chapter_title`, `question_number`, `is_manager_answer_chunk`,
-  `has_substantive_answer`, `referenced_appendices`, `embedding_text`.
+  `has_substantive_answer`, `referenced_appendices`, `embedding_text`,
+  `source_page_start`, `source_page_end`, `source_para_start`,
+  `source_para_end`, `source_locator_type`, `source_locator_label`.
 - **Excluded from indexing:** `source_role='report_template'` — the report
   template itself must never be retrieved as evidence.
 
@@ -192,6 +207,12 @@ Critical idempotency rule (learned the hard way from the stale-appendix bug):
 
 Handles both PDFs and DOCX:
 
+The implemented provenance model is now generic across source types. PDFs
+populate real `source_page_num` values and page-based locator labels. DOCX
+sources populate the same generic fields, but in the current Databricks parse
+they reliably populate `source_para_num` and paragraph-based locator labels
+while true rendered `source_page_num` remains unavailable.
+
 - **PDF (most appendices):** PyMuPDF page extraction → `document_pages` with
   `(document_id, page_number, text)` and `source_role`/`source_tier` propagated
   from `documents`.
@@ -237,6 +258,10 @@ Output: `document_chunks`. Each chunk carries:
   `question_number`, `is_manager_answer_chunk`, `has_substantive_answer`,
   `referenced_appendices`.
 
+In the implemented pipeline, chunk provenance also carries the unified range
+fields `source_page_start`, `source_page_end`, `source_para_start`,
+`source_para_end`, plus `source_locator_type` and `source_locator_label`.
+
 Chunking strategy:
 
 - **PDF / appendix:** sliding window over consecutive pages
@@ -244,6 +269,10 @@ Chunking strategy:
 - **DDQ DOCX:** chunk **by section**. If a section is too long, split *within*
   the section, preserving `section_code` on every split. Never let one chunk
   straddle two section codes.
+
+For diagnostics, chunk text may include markers such as `[PAGE N]` or
+`[PARA N]`, but user-facing citation rendering is driven by the unified locator
+metadata rather than by those inline markers.
 
 `MERGE` rule: when a chunk row already exists use `UPDATE SET *` unconditionally
 (not just on `chunk_sha` change). Metadata like `source_role`, `source_tier`, and
@@ -371,7 +400,7 @@ Requirements:
 - Use appendices only to support, clarify, or challenge the DDQ response.
 - If the DDQ section is missing or thin, state the limitation carefully.
 - Return valid JSON only with keys `assessment_text` and `confidence`.
-- Cite material claims inline using [file | p.N | tier X] markers.
+- Cite material claims inline using [file | locator | tier X] markers.
 EVIDENCE: <formatted evidence blocks>
 ```
 
@@ -380,6 +409,12 @@ physically by `chunk_text` never containing question wording.
 
 Robustness: output parsed via `assessment_text` → `assessment` → `text` → raw
 response fallback. A blank assessment is **never** silently written.
+
+The implemented citation formatter in `07_assess_odd_report.py` no longer
+surfaces internal evidence counters such as `E1`, `E2`, or `E3` as if they
+were document references. Evidence blocks now use a stable document label
+(`DDQ`, appendix short title, or mapped file label) plus the unified
+`source_locator_label`.
 
 #### 4.2.5 Risk rating
 
@@ -487,13 +522,15 @@ Run on the canonical engagement `odd_ssga_2025`.
    DDQ is tier 0, appendices tier 1, the template tier 9 and excluded from
    indexing.
 3. **Parse:** completed DDQ yields 23 section codes; appendix PDFs yield page
-   rows; report template yields the engagement metadata table, the 23-topic
-   Part 1 table, and the Part 2 framework.
+   rows with page-based provenance; DOCX rows carry generic locator metadata;
+   report template yields the engagement metadata table, the 23-topic Part 1
+   table, and the Part 2 framework.
 4. **Chunk:** every chunk has both `chunk_text` and `embedding_text`; DDQ
    chunks have `section_code`, `chapter_code`, `is_manager_answer_chunk`;
-   `chunk_text` excludes question wording, `embedding_text` includes it.
+   `chunk_text` excludes question wording, `embedding_text` includes it, and
+   chunks carry unified locator metadata.
 5. **Index:** `idx_odd_ssga_2025` status is `READY`. Every column in
-   `required_metadata_columns` is synced and non-null for DDQ chunks.
+   `required_metadata_columns` is synced, including `source_locator_label`.
 6. **Spec loading:** `odd_report_topics` has 23 rows, every row joins to a
    topic in `ODDAgent.md` with a `topic_prompt`.
 7. **Assess:** `odd_topic_assessments` has 23 rows. Every row has non-empty
@@ -613,3 +650,31 @@ design plus the `embedding_text` / `chunk_text` split, the section/appendix
 multi-pass, and the claim verifier already address the underlying defects.
 Two-step is the right answer only if a future engagement has a DDQ where
 section codes are unreliable as a join key but question_id is.
+
+### 7.3 True DOCX page-number provenance
+
+**Question.** The unified provenance implementation is now in place, and
+`07_assess_odd_report.py` can cite generic locators across source types.
+However, for DOCX sources in the current Databricks parse, `source_page_num`
+is still null, so citations fall back to paragraph-based locators instead of
+rendered Word page numbers.
+
+**Why it matters.** The current behavior is honest and materially better than
+the older fake `p.143`-style citations, but the desired end-state for the ODD
+report is page-number citation for both PDF and Word documents.
+
+**What we'd need to investigate.**
+
+1. Add a rendered Word page-mapping step for DOCX sources so parsed rows can
+   populate true `source_page_num` in `03_parse_sources.py`.
+2. Decide where that renderer lives: local Word automation, a conversion step
+   that emits a page map into the engagement volume, or another reliable
+   pre-processing service outside Databricks.
+3. Update `03_parse_sources.py` to ingest the DOCX page map and prefer
+   page-based locator labels when page numbers are available.
+4. Re-run `03`â€“`05` and then `07`â€“`08` so `source_locator_label` becomes
+   page-based for DOCX too, with minimal or no further change in `07`.
+
+This is the main remaining provenance gap after the unification work. The
+assessment layer is already generic enough; the missing piece is reliable DOCX
+page extraction upstream.

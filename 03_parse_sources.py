@@ -65,6 +65,54 @@ def _ddq_table_metadata(doc: Document) -> dict:
     return extract_label_value_metadata(rows)
 
 
+def _make_page_row(
+    doc_meta: dict,
+    page_num: int,
+    page_text: str,
+    parse_method: str,
+    content_role: str,
+    source_page_num: int | None,
+    source_para_num: int | None,
+    source_locator_type: str,
+    section_code: str | None = None,
+    section_title: str | None = None,
+    chapter_code: str | None = None,
+    chapter_title: str | None = None,
+    question_number: int | None = None,
+    has_substantive_answer: bool | None = None,
+    referenced_appendices: str | None = None,
+) -> dict:
+    return {
+        "engagement_id": ENGAGEMENT_ID,
+        "document_id": doc_meta["document_id"],
+        "file_name": doc_meta["file_name"],
+        "source_path_dbfs": doc_meta["file_path_dbfs"],
+        "source_path_local": doc_meta["file_path_local"],
+        "page_num": page_num,
+        "source_page_num": source_page_num,
+        "source_para_num": source_para_num,
+        "source_locator_type": source_locator_type,
+        "source_locator_label": build_source_locator_label(
+            source_page_num=source_page_num,
+            source_para_num=source_para_num,
+            source_locator_type=source_locator_type,
+        ),
+        "page_text": page_text,
+        "page_char_count": len(page_text or ""),
+        "parse_method": parse_method,
+        "source_role": doc_meta["source_role"],
+        "source_tier": doc_meta["source_tier"],
+        "section_code": section_code,
+        "section_title": section_title,
+        "chapter_code": chapter_code,
+        "chapter_title": chapter_title,
+        "content_role": content_role,
+        "question_number": question_number,
+        "has_substantive_answer": has_substantive_answer,
+        "referenced_appendices": referenced_appendices,
+    }
+
+
 def _parse_manager_ddq(local_path: str, doc_meta: dict) -> tuple[list[dict], dict]:
     doc = Document(local_path)
     metadata = _ddq_table_metadata(doc)
@@ -100,6 +148,9 @@ def _parse_manager_ddq(local_path: str, doc_meta: dict) -> tuple[list[dict], dic
             current_question_number = None
             raw_rows.append({
                 "page_num": idx + 1,
+                "source_page_num": None,
+                "source_para_num": idx + 1,
+                "source_locator_type": "paragraph",
                 "page_text": text,
                 "content_role": "section_heading",
                 "section_code": current_section_code,
@@ -115,6 +166,9 @@ def _parse_manager_ddq(local_path: str, doc_meta: dict) -> tuple[list[dict], dic
             current_question_number = int(m_q.group(1))
             raw_rows.append({
                 "page_num": idx + 1,
+                "source_page_num": None,
+                "source_para_num": idx + 1,
+                "source_locator_type": "paragraph",
                 "page_text": text,
                 "content_role": "question",
                 "section_code": current_section_code,
@@ -127,6 +181,9 @@ def _parse_manager_ddq(local_path: str, doc_meta: dict) -> tuple[list[dict], dic
 
         raw_rows.append({
             "page_num": idx + 1,
+            "source_page_num": None,
+            "source_para_num": idx + 1,
+            "source_locator_type": "paragraph",
             "page_text": text,
             "content_role": "answer" if current_section_code else "narrative",
             "section_code": current_section_code,
@@ -152,27 +209,23 @@ def _parse_manager_ddq(local_path: str, doc_meta: dict) -> tuple[list[dict], dic
     page_rows = []
     for row in raw_rows:
         flags = section_flags.get(row["section_code"], {"has_substantive_answer": False, "referenced_appendices": []})
-        page_rows.append({
-            "engagement_id": ENGAGEMENT_ID,
-            "document_id": doc_meta["document_id"],
-            "file_name": doc_meta["file_name"],
-            "source_path_dbfs": doc_meta["file_path_dbfs"],
-            "source_path_local": doc_meta["file_path_local"],
-            "page_num": row["page_num"],
-            "page_text": row["page_text"],
-            "page_char_count": len(row["page_text"]),
-            "parse_method": "python_docx_manager_ddq",
-            "source_role": doc_meta["source_role"],
-            "source_tier": doc_meta["source_tier"],
-            "section_code": row["section_code"],
-            "section_title": row["section_title"],
-            "chapter_code": row["chapter_code"],
-            "chapter_title": row["chapter_title"],
-            "content_role": row["content_role"],
-            "question_number": row["question_number"],
-            "has_substantive_answer": bool(flags["has_substantive_answer"]),
-            "referenced_appendices": json.dumps(flags["referenced_appendices"], ensure_ascii=True),
-        })
+        page_rows.append(_make_page_row(
+            doc_meta=doc_meta,
+            page_num=row["page_num"],
+            page_text=row["page_text"],
+            parse_method="python_docx_manager_ddq",
+            content_role=row["content_role"],
+            source_page_num=row.get("source_page_num"),
+            source_para_num=row.get("source_para_num"),
+            source_locator_type=row.get("source_locator_type") or "paragraph",
+            section_code=row["section_code"],
+            section_title=row["section_title"],
+            chapter_code=row["chapter_code"],
+            chapter_title=row["chapter_title"],
+            question_number=row["question_number"],
+            has_substantive_answer=bool(flags["has_substantive_answer"]),
+            referenced_appendices=json.dumps(flags["referenced_appendices"], ensure_ascii=True),
+        ))
     return page_rows, metadata
 
 
@@ -183,27 +236,16 @@ def _parse_generic_docx(local_path: str, doc_meta: dict) -> tuple[list[dict], di
         text = normalize_text(para.text)
         if not text:
             continue
-        page_rows.append({
-            "engagement_id": ENGAGEMENT_ID,
-            "document_id": doc_meta["document_id"],
-            "file_name": doc_meta["file_name"],
-            "source_path_dbfs": doc_meta["file_path_dbfs"],
-            "source_path_local": doc_meta["file_path_local"],
-            "page_num": idx + 1,
-            "page_text": text,
-            "page_char_count": len(text),
-            "parse_method": "python_docx_generic",
-            "source_role": doc_meta["source_role"],
-            "source_tier": doc_meta["source_tier"],
-            "section_code": None,
-            "section_title": None,
-            "chapter_code": None,
-            "chapter_title": None,
-            "content_role": "narrative",
-            "question_number": None,
-            "has_substantive_answer": None,
-            "referenced_appendices": None,
-        })
+        page_rows.append(_make_page_row(
+            doc_meta=doc_meta,
+            page_num=idx + 1,
+            page_text=text,
+            parse_method="python_docx_generic",
+            content_role="narrative",
+            source_page_num=None,
+            source_para_num=idx + 1,
+            source_locator_type="paragraph",
+        ))
     return page_rows, {}
 
 
@@ -213,27 +255,19 @@ def _parse_pdf(local_path: str, doc_meta: dict) -> tuple[list[dict], dict]:
     for idx in range(pdf.page_count):
         page = pdf.load_page(idx)
         text = page.get_text("text") or ""
-        page_rows.append({
-            "engagement_id": ENGAGEMENT_ID,
-            "document_id": doc_meta["document_id"],
-            "file_name": doc_meta["file_name"],
-            "source_path_dbfs": doc_meta["file_path_dbfs"],
-            "source_path_local": local_path,
-            "page_num": idx + 1,
-            "page_text": text,
-            "page_char_count": len(text),
-            "parse_method": "pymupdf_text",
-            "source_role": doc_meta["source_role"],
-            "source_tier": doc_meta["source_tier"],
-            "section_code": None,
-            "section_title": None,
-            "chapter_code": None,
-            "chapter_title": None,
-            "content_role": "page",
-            "question_number": None,
-            "has_substantive_answer": None,
-            "referenced_appendices": None,
-        })
+        page_rows.append(_make_page_row(
+            {
+                **doc_meta,
+                "file_path_local": local_path,
+            },
+            page_num=idx + 1,
+            page_text=text,
+            parse_method="pymupdf_text",
+            content_role="page",
+            source_page_num=idx + 1,
+            source_para_num=idx + 1,
+            source_locator_type="page",
+        ))
     pdf.close()
     return page_rows, {}
 
@@ -304,6 +338,10 @@ pages_schema = T.StructType([
     T.StructField("source_path_dbfs", T.StringType(), nullable=True),
     T.StructField("source_path_local", T.StringType(), nullable=True),
     T.StructField("page_num", T.IntegerType(), nullable=False),
+    T.StructField("source_page_num", T.IntegerType(), nullable=True),
+    T.StructField("source_para_num", T.IntegerType(), nullable=True),
+    T.StructField("source_locator_type", T.StringType(), nullable=True),
+    T.StructField("source_locator_label", T.StringType(), nullable=True),
     T.StructField("page_text", T.StringType(), nullable=True),
     T.StructField("page_char_count", T.IntegerType(), nullable=True),
     T.StructField("parse_method", T.StringType(), nullable=True),

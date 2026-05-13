@@ -56,6 +56,15 @@ def _pick_section_hint(text: str) -> str | None:
     return None
 
 
+def _row_marker(row: dict) -> str:
+    locator_type = normalize_text(row.get("source_locator_type")).lower()
+    if locator_type == "page" and row.get("source_page_num") is not None:
+        return f"[PAGE {int(row['source_page_num'])}]"
+    if row.get("source_para_num") is not None:
+        return f"[PARA {int(row['source_para_num'])}]"
+    return f"[ROW {int(row.get('page_num') or 0)}]"
+
+
 def _build_pdf_chunks(pages: list[dict], source_role: str, source_tier: int) -> list[dict]:
     legal_entity_hint = detect_legal_entity_hint([p.get("page_text") or "" for p in pages[:3]], PROFILE)
     chunks = []
@@ -84,7 +93,19 @@ def _build_pdf_chunks(pages: list[dict], source_role: str, source_tier: int) -> 
         chunk_pages = pages[start:end + 1]
         page_start = chunk_pages[0]["page_num"]
         page_end = chunk_pages[-1]["page_num"]
-        parts = [f"[PAGE {p['page_num']}]\n{p['page_text'] or ''}".strip() for p in chunk_pages]
+        source_page_start = chunk_pages[0].get("source_page_num")
+        source_page_end = chunk_pages[-1].get("source_page_num")
+        source_para_start = chunk_pages[0].get("source_para_num")
+        source_para_end = chunk_pages[-1].get("source_para_num")
+        source_locator_type = chunk_pages[0].get("source_locator_type") or "page"
+        source_locator_label = build_source_locator_range(
+            source_page_start=source_page_start,
+            source_page_end=source_page_end,
+            source_para_start=source_para_start,
+            source_para_end=source_para_end,
+            source_locator_type=source_locator_type,
+        )
+        parts = [f"{_row_marker(p)}\n{p['page_text'] or ''}".strip() for p in chunk_pages]
         chunk_text = "\n\n".join(parts).strip()
         chunk_type = "sliding_pages"
         chunk_id = sha256_hex(
@@ -100,6 +121,12 @@ def _build_pdf_chunks(pages: list[dict], source_role: str, source_tier: int) -> 
             "chunk_index": chunk_idx,
             "page_start": page_start,
             "page_end": page_end,
+            "source_page_start": source_page_start,
+            "source_page_end": source_page_end,
+            "source_para_start": source_para_start,
+            "source_para_end": source_para_end,
+            "source_locator_type": source_locator_type,
+            "source_locator_label": source_locator_label,
             "chunk_type": chunk_type,
             "section_hint": _pick_section_hint(chunk_text),
             "source_tier": source_tier,
@@ -175,18 +202,18 @@ def _build_manager_ddq_chunks(rows: list[dict], source_tier: int) -> list[dict]:
                 prefix = ""
                 embedding_prefix = ""
                 if row.get("content_role") == "section_heading":
-                    prefix = f"{section_code}. {section_title}"
+                    prefix = f"{_row_marker(row)}\n{section_code}. {section_title}"
                     embedding_prefix = prefix
                 elif row.get("content_role") == "question":
                     # Configurable split: for the ODD workflow, question text is kept
                     # in embedding_text for relevance, but out of chunk_text so the
                     # assessment cites the manager's answer rather than restating the
                     # questionnaire. Other workflows can change this in _config.py.
-                    question_text = f"Question {row.get('question_number')}: {row.get('page_text')}"
+                    question_text = f"{_row_marker(row)}\nQuestion {row.get('question_number')}: {row.get('page_text')}"
                     prefix = question_text if INCLUDE_QUESTIONS_IN_CHUNK_TEXT else ""
                     embedding_prefix = question_text if INCLUDE_QUESTIONS_IN_EMBEDDING else prefix
                 else:
-                    prefix = row.get("page_text") or ""
+                    prefix = f"{_row_marker(row)}\n{row.get('page_text') or ''}".strip()
                     embedding_prefix = prefix
                 if normalize_text(prefix):
                     part_lines.append(prefix)
@@ -209,6 +236,18 @@ def _build_manager_ddq_chunks(rows: list[dict], source_tier: int) -> list[dict]:
                 "chunk_index": chunk_idx,
                 "page_start": segment[0]["page_num"],
                 "page_end": segment[-1]["page_num"],
+                "source_page_start": segment[0].get("source_page_num"),
+                "source_page_end": segment[-1].get("source_page_num"),
+                "source_para_start": segment[0].get("source_para_num"),
+                "source_para_end": segment[-1].get("source_para_num"),
+                "source_locator_type": segment[0].get("source_locator_type") or "paragraph",
+                "source_locator_label": build_source_locator_range(
+                    source_page_start=segment[0].get("source_page_num"),
+                    source_page_end=segment[-1].get("source_page_num"),
+                    source_para_start=segment[0].get("source_para_num"),
+                    source_para_end=segment[-1].get("source_para_num"),
+                    source_locator_type=segment[0].get("source_locator_type") or "paragraph",
+                ),
                 "chunk_type": "ddq_section",
                 "section_hint": f"{section_code}. {section_title}",
                 "source_tier": source_tier,

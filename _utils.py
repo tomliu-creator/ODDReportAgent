@@ -261,35 +261,116 @@ def get_doc_short_title(file_name: str, profile: dict | None = None) -> str:
     return stem.replace("_", " ").strip() or (file_name or "")
 
 
-CITATION_REGEX = re.compile(r"\[([^\[\]]+?)(?:\s*\|\s*)?p\.?(\d+)(?:\s*\|\s*tier\s*([0-9]+))?\]", re.IGNORECASE)
+def get_doc_citation_label(file_name: str, source_role: str | None = None, profile: dict | None = None) -> str:
+    role = normalize_text(source_role).lower()
+    if role == "manager_completed_ddq":
+        return "DDQ"
+    return get_doc_short_title(file_name, profile)
+
+
+def build_source_locator_label(
+    source_page_num: int | None = None,
+    source_para_num: int | None = None,
+    source_locator_type: str | None = None,
+) -> str | None:
+    locator_type = normalize_text(source_locator_type).lower()
+    if locator_type == "page" and source_page_num is not None:
+        return f"p.{int(source_page_num)}"
+    if locator_type == "paragraph" and source_para_num is not None:
+        return f"para {int(source_para_num)}"
+    if locator_type == "page_paragraph" and source_page_num is not None and source_para_num is not None:
+        return f"p.{int(source_page_num)}, para {int(source_para_num)}"
+    if source_page_num is not None:
+        return f"p.{int(source_page_num)}"
+    if source_para_num is not None:
+        return f"para {int(source_para_num)}"
+    return None
+
+
+def build_source_locator_range(
+    source_page_start: int | None = None,
+    source_page_end: int | None = None,
+    source_para_start: int | None = None,
+    source_para_end: int | None = None,
+    source_locator_type: str | None = None,
+) -> str | None:
+    locator_type = normalize_text(source_locator_type).lower()
+    if locator_type == "page" and source_page_start is not None:
+        end = source_page_end if source_page_end is not None else source_page_start
+        return f"p.{int(source_page_start)}" if int(end) == int(source_page_start) else f"p.{int(source_page_start)}-{int(end)}"
+    if locator_type == "paragraph" and source_para_start is not None:
+        end = source_para_end if source_para_end is not None else source_para_start
+        return f"para {int(source_para_start)}" if int(end) == int(source_para_start) else f"para {int(source_para_start)}-{int(end)}"
+    if locator_type == "page_paragraph":
+        page_label = build_source_locator_range(source_page_start, source_page_end, None, None, "page")
+        para_label = build_source_locator_range(None, None, source_para_start, source_para_end, "paragraph")
+        if page_label and para_label:
+            return f"{page_label}, {para_label}"
+        return page_label or para_label
+    return (
+        build_source_locator_range(source_page_start, source_page_end, None, None, "page")
+        or build_source_locator_range(None, None, source_para_start, source_para_end, "paragraph")
+    )
+
+
+def _locator_signature(locator_text: str | None) -> tuple[str | None, list[int]]:
+    text = normalize_text(locator_text).lower()
+    if not text:
+        return None, []
+    if text.startswith("p."):
+        locator_type = "page"
+    elif text.startswith("para "):
+        locator_type = "paragraph"
+    else:
+        locator_type = None
+    nums = [int(x) for x in re.findall(r"\d+", text)]
+    return locator_type, nums
+
+
+def locator_matches(citation_locator: str | None, evidence_locator: str | None) -> bool:
+    citation_type, citation_nums = _locator_signature(citation_locator)
+    evidence_type, evidence_nums = _locator_signature(evidence_locator)
+    if not citation_locator or not evidence_locator:
+        return False
+    if normalize_text(citation_locator).lower() == normalize_text(evidence_locator).lower():
+        return True
+    if citation_type and evidence_type and citation_type != evidence_type:
+        return False
+    if not citation_nums or not evidence_nums:
+        return False
+    if len(evidence_nums) == 1:
+        return citation_nums[0] == evidence_nums[0]
+    return evidence_nums[0] <= citation_nums[0] <= evidence_nums[-1]
+
+
+CITATION_REGEX = re.compile(r"\[([^\[\]|]+?)\s*\|\s*([^\[\]|]+?)\s*\|\s*tier\s*([0-9]+)\]", re.IGNORECASE)
 
 
 def parse_citations(answer_text: str, evidence: list[dict]) -> list[dict]:
-    """Extract [file p.N] markers from the model's answer and resolve to chunk_ids."""
+    """Extract [file | locator | tier X] markers from the model's answer and resolve to chunk_ids."""
     if not answer_text:
         return []
     found = []
     for m in CITATION_REGEX.finditer(answer_text):
-        file_token, page_token = m.group(1).strip(), m.group(2).strip()
-        try:
-            page = int(page_token)
-        except ValueError:
-            continue
+        file_token = m.group(1).strip()
+        locator_token = m.group(2).strip()
+        nums = [int(x) for x in re.findall(r"\d+", locator_token)]
+        page = nums[0] if nums else None
         match_chunk = None
         for ch in evidence:
             fname = ch.get("file_name") or ""
-            short_title = os.path.splitext(fname)[0].replace("_", " ").strip()
+            citation_label = ch.get("citation_label") or ""
             file_lower = file_token.lower()
             fname_lower = fname.lower()
-            short_lower = short_title.lower()
+            label_lower = citation_label.lower()
+            locator_label = ch.get("source_locator_label") or ""
             if fname and (
                 file_lower in fname_lower
                 or fname_lower in file_lower
-                or (short_lower and file_lower in short_lower)
-                or (short_lower and short_lower in file_lower)
+                or (label_lower and file_lower in label_lower)
+                or (label_lower and label_lower in file_lower)
             ):
-                ps, pe = ch.get("page_start") or 0, ch.get("page_end") or 0
-                if ps <= page <= pe or ps == page or pe == page:
+                if locator_matches(locator_token, locator_label):
                     match_chunk = ch
                     break
         found.append({

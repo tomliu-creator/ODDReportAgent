@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS {PAGES_TABLE} (
   source_path_dbfs STRING,
   source_path_local STRING,
   page_num INT,
+  source_page_num INT,
+  source_para_num INT,
+  source_locator_type STRING,
+  source_locator_label STRING,
   page_text STRING,
   page_char_count INT,
   parse_method STRING,
@@ -112,6 +116,12 @@ CREATE TABLE IF NOT EXISTS {CHUNKS_TABLE} (
   chunk_index INT,
   page_start INT,
   page_end INT,
+  source_page_start INT,
+  source_page_end INT,
+  source_para_start INT,
+  source_para_end INT,
+  source_locator_type STRING,
+  source_locator_label STRING,
   chunk_type STRING,
   section_hint STRING,
   source_tier INT,
@@ -150,6 +160,10 @@ for col in [
     _add_column_if_missing(DOCUMENTS_TABLE, col)
 
 for col in [
+    "source_page_num INT",
+    "source_para_num INT",
+    "source_locator_type STRING",
+    "source_locator_label STRING",
     "source_role STRING",
     "source_tier INT",
     "section_code STRING",
@@ -164,6 +178,12 @@ for col in [
     _add_column_if_missing(PAGES_TABLE, col)
 
 for col in [
+    "source_page_start INT",
+    "source_page_end INT",
+    "source_para_start INT",
+    "source_para_end INT",
+    "source_locator_type STRING",
+    "source_locator_label STRING",
     "source_role STRING",
     "section_code STRING",
     "section_title STRING",

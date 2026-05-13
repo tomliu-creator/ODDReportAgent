@@ -112,6 +112,12 @@ vs_cols = [
     "source_path_dbfs",
     "page_start",
     "page_end",
+    "source_page_start",
+    "source_page_end",
+    "source_para_start",
+    "source_para_end",
+    "source_locator_type",
+    "source_locator_label",
     "chunk_type",
     "section_hint",
     "chunk_index",
@@ -484,7 +490,7 @@ for topic in topics:
             + (f"TOPIC-SPECIFIC MUST-COVER SCOPE:\n{topic.get('topic_prompt')}\n\n" if normalize_text(topic.get("topic_prompt")) else "")
             +
             f"CHUNK FILE: {chunk.get('file_name')}\n"
-            f"PAGES: {chunk.get('page_start')}-{chunk.get('page_end')}\n"
+            f"LOCATOR: {chunk.get('source_locator_label') or chunk.get('page_start')}\n"
             f"SOURCE ROLE: {chunk.get('source_role')}\n"
             f"TEXT:\n{preview}\n\n"
             "Relevance rule: if a topic-specific must-cover scope is provided, reply yes/partial only when "
@@ -585,6 +591,13 @@ def _select_evidence(topic: dict) -> tuple[list[str], list[dict], bool]:
             "file_name": chunk["file_name"],
             "page_start": chunk["page_start"],
             "page_end": chunk["page_end"],
+            "source_page_start": chunk.get("source_page_start"),
+            "source_page_end": chunk.get("source_page_end"),
+            "source_para_start": chunk.get("source_para_start"),
+            "source_para_end": chunk.get("source_para_end"),
+            "source_locator_type": chunk.get("source_locator_type"),
+            "source_locator_label": chunk.get("source_locator_label"),
+            "citation_label": get_doc_citation_label(chunk.get("file_name"), source_role, PROFILE),
             "source_tier": _safe_int(chunk.get("source_tier"), 5),
             "source_role": source_role,
             "section_code": chunk.get("section_code"),
@@ -595,10 +608,12 @@ def _select_evidence(topic: dict) -> tuple[list[str], list[dict], bool]:
 
 def _format_evidence(evidence: list[dict]) -> str:
     lines = []
-    for idx, item in enumerate(evidence, start=1):
-        short_title = get_doc_short_title(item.get("file_name"), PROFILE)
+    for item in evidence:
+        citation_label = item.get("citation_label") or get_doc_short_title(item.get("file_name"), PROFILE)
+        locator_label = item.get("source_locator_label") or f"p.{item.get('page_start')}"
         lines.append(
-            f"[E{idx}] [{short_title} | p.{item.get('page_start')} | tier {item.get('source_tier')} | role {item.get('source_role')}]\n"
+            f"[{citation_label} | {locator_label} | tier {item.get('source_tier')}]\n"
+            f"Role: {item.get('source_role')}\n"
             f"{(item.get('text_en') or '')[:2500]}"
         )
     return "\n\n---\n\n".join(lines)
@@ -635,7 +650,7 @@ for topic in topics:
         "- Do not use words such as Low, Medium, High, Unacceptable, Satisfactory, or Unsatisfactory as an overall judgment.\n"
         "- Risk judgment is generated in a separate step; keep `assessment_text` factual and descriptive only.\n"
         "- Return valid JSON only with keys `assessment_text` and `confidence`.\n"
-        "- The `assessment_text` must cite material claims inline using `[file | p.N | tier X]` markers.\n\n"
+        "- The `assessment_text` must cite material claims inline using `[file | locator | tier X]` markers such as `[DDQ | para 145 | tier 0]` or `[Annual Report | p.11 | tier 1]`.\n\n"
         f"EVIDENCE:\n{evidence_block}"
     )
     assessment_prompts.append({
