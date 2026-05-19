@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ODD Report Agent — Architecture & Lessons Learned</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; overflow: hidden; }
+
+  /* Slide container */
+  .deck { width: 100vw; height: 100vh; position: relative; }
+  .slide { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 60px 80px; opacity: 0; pointer-events: none; transition: opacity 0.4s ease; }
+  .slide.active { opacity: 1; pointer-events: auto; }
+
+  /* Typography */
+  h1 { font-size: 2.8em; font-weight: 700; color: #f8fafc; margin-bottom: 12px; line-height: 1.15; }
+  h2 { font-size: 2.2em; font-weight: 700; color: #f8fafc; margin-bottom: 24px; line-height: 1.2; }
+  h3 { font-size: 1.3em; font-weight: 600; color: #94a3b8; margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.05em; }
+  p, li { font-size: 1.25em; line-height: 1.6; color: #cbd5e1; }
+  ul { list-style: none; padding: 0; }
+  ul li { padding: 6px 0; padding-left: 24px; position: relative; }
+  ul li::before { content: ''; position: absolute; left: 0; top: 16px; width: 8px; height: 8px; border-radius: 50%; background: #3b82f6; }
+  .subtitle { font-size: 1.4em; color: #94a3b8; margin-bottom: 32px; }
+  .small { font-size: 0.95em; color: #64748b; }
+  strong, b { color: #f8fafc; }
+  .highlight { color: #60a5fa; font-weight: 600; }
+  .warn { color: #f59e0b; font-weight: 600; }
+  .bad { color: #ef4444; font-weight: 600; }
+  .good { color: #34d399; font-weight: 600; }
+
+  /* Score card */
+  .score-card { display: inline-flex; align-items: baseline; gap: 8px; margin: 16px 0 24px 0; }
+  .score-big { font-size: 4em; font-weight: 800; color: #f59e0b; }
+  .score-label { font-size: 1.5em; color: #94a3b8; }
+  .score-mid { font-size: 2.2em; font-weight: 800; color: #f59e0b; }
+
+  /* Grid layouts */
+  .cols { display: grid; gap: 40px; align-items: start; }
+  .cols-2 { grid-template-columns: 1fr 1fr; }
+  .cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .cols-23 { grid-template-columns: 2fr 3fr; }
+  .cols-32 { grid-template-columns: 3fr 2fr; }
+
+  /* Cards */
+  .card { background: rgba(30, 41, 59, 0.7); border: 1px solid #334155; border-radius: 12px; padding: 24px; }
+  .card h3 { margin-bottom: 12px; }
+  .card-accent { border-left: 4px solid #3b82f6; }
+  .card-warn { border-left: 4px solid #f59e0b; }
+  .card-bad { border-left: 4px solid #ef4444; }
+  .card-good { border-left: 4px solid #34d399; }
+
+  /* Diagram boxes */
+  .pipeline { display: flex; align-items: center; gap: 0; flex-wrap: wrap; justify-content: center; margin: 24px 0; }
+  .pipe-box { background: #1e3a5f; border: 1px solid #3b82f6; border-radius: 8px; padding: 12px 18px; font-size: 0.95em; font-weight: 600; color: #93c5fd; text-align: center; min-width: 120px; }
+  .pipe-box.reuse { background: #1e3a5f; border-color: #3b82f6; color: #93c5fd; }
+  .pipe-box.recode { background: #3b1f1f; border-color: #ef4444; color: #fca5a5; }
+  .pipe-box.spec { background: #1f3b2f; border-color: #34d399; color: #6ee7b7; }
+  .pipe-arrow { font-size: 1.4em; color: #475569; padding: 0 6px; }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; font-size: 1.05em; }
+  th { text-align: left; padding: 10px 14px; background: #1e293b; color: #94a3b8; font-weight: 600; border-bottom: 2px solid #334155; }
+  td { padding: 10px 14px; border-bottom: 1px solid #1e293b; color: #cbd5e1; }
+  tr:hover td { background: rgba(59, 130, 246, 0.05); }
+  table.compact th, table.compact td { padding: 7px 12px; font-size: 0.92em; }
+
+  /* Tier bar chart */
+  .tier-row { display: flex; align-items: center; gap: 12px; margin: 6px 0; }
+  .tier-label { width: 230px; font-size: 0.98em; color: #cbd5e1; text-align: right; }
+  .tier-bar { height: 28px; border-radius: 4px; display: flex; align-items: center; padding-left: 10px; font-size: 0.85em; font-weight: 600; color: #0f172a; }
+
+  /* Nav */
+  .nav { position: fixed; bottom: 24px; right: 32px; display: flex; gap: 12px; z-index: 100; }
+  .nav button { background: #1e293b; border: 1px solid #334155; color: #94a3b8; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 1em; transition: all 0.2s; }
+  .nav button:hover { background: #334155; color: #e2e8f0; }
+  .progress { position: fixed; bottom: 0; left: 0; height: 3px; background: #3b82f6; transition: width 0.4s; z-index: 100; }
+  .slide-num { position: fixed; bottom: 28px; left: 32px; color: #475569; font-size: 0.9em; z-index: 100; }
+
+  /* Section divider */
+  .divider { text-align: center; }
+  .divider h2 { font-size: 3em; margin-bottom: 16px; }
+  .divider p { font-size: 1.4em; color: #64748b; }
+  .divider-line { width: 80px; height: 4px; background: #3b82f6; margin: 24px auto; border-radius: 2px; }
+
+  /* Before/After */
+  .ba { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 16px; }
+  .ba-before { background: rgba(239,68,68,0.08); border: 1px solid #7f1d1d; border-radius: 10px; padding: 20px; }
+  .ba-after { background: rgba(52,211,153,0.08); border: 1px solid #14532d; border-radius: 10px; padding: 20px; }
+  .ba h3 { font-size: 1.1em; }
+
+  /* Print / PDF export — render every slide on its own page */
+  @page { size: landscape; margin: 0; }
+  @media print {
+    html, body { overflow: visible !important; height: auto !important; background: #0f172a !important; }
+    .deck { width: auto !important; height: auto !important; position: static !important; }
+    .slide {
+      position: relative !important;
+      inset: auto !important;
+      opacity: 1 !important;
+      pointer-events: auto !important;
+      width: 100% !important;
+      height: 100vh !important;
+      page-break-after: always;
+      break-after: page;
+      page-break-inside: avoid;
+      break-inside: avoid;
+      overflow: hidden;
+    }
+    .slide:last-child { page-break-after: avoid; break-after: auto; }
+    .nav, .progress, .slide-num { display: none !important; }
+    * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  }
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+<!-- SLIDE 1: Title -->
+<div class="slide active" id="s1">
+  <div>
+    <h3>Databricks RAG Agent</h3>
+    <h1>ODD Report Agent</h1>
+    <p class="subtitle">Architecture, Technical Solutions & Lessons Learned</p>
+    <div style="margin-top: 40px;">
+      <p class="small">May 2026 &middot; APG Asset Management</p>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 2: The Problem -->
+<div class="slide" id="s2">
+  <h3>The Business Problem</h3>
+  <h2>What does an ODD analyst do?</h2>
+  <div class="cols cols-2" style="margin-top: 16px;">
+    <div>
+      <ul>
+        <li>Read a <strong>completed manager DDQ</strong> (100+ pages)</li>
+        <li>Cross-reference <strong>25+ appendices</strong> (SOC reports, annual reports, policies, org charts)</li>
+        <li>Write <strong>22 topic assessments</strong> across 4 chapters</li>
+        <li>Assign <strong>risk ratings</strong> per topic and per chapter</li>
+        <li>Produce a formal <strong>ODD report</strong> for the investment committee</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>The cost</h3>
+      <p style="font-size: 1.1em;">Each ODD report takes <span class="highlight">days of analyst time</span>, much of it reading, cross-referencing, and writing structured prose that follows a repeatable pattern.</p>
+      <p style="margin-top: 16px; font-size: 1.1em;">The agent aims to produce a <span class="highlight">first draft</span> that reduces rework from days to hours.</p>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 3: What the Agent Does -->
+<div class="slide" id="s3">
+  <h3>High-Level Architecture</h3>
+  <h2>Documents in, ODD report out</h2>
+  <div class="pipeline" style="margin: 32px 0;">
+    <div class="pipe-box">Upload<br><span class="small">DDQ + Appendices</span></div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-box">Parse<br><span class="small">Extract text</span></div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-box">Chunk<br><span class="small">Overlap windows</span></div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-box">Index<br><span class="small">Vector Search</span></div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-box">Retrieve<br><span class="small">Per topic</span></div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-box">Assess<br><span class="small">LLM drafts</span></div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-box">Fill<br><span class="small">Word report</span></div>
+  </div>
+  <div class="cols cols-2" style="margin-top: 24px;">
+    <div class="card card-accent">
+      <h3>22 topics assessed</h3>
+      <p>Firm &amp; Org (A) &middot; Risk &amp; Compliance (B) &middot; Valuation &amp; Reporting (C) &middot; Operations &amp; Systems (D)</p>
+    </div>
+    <div class="card card-accent">
+      <h3>Per topic, the agent produces</h3>
+      <p>200&ndash;500 word assessment &middot; inline citations &middot; risk rating (Low / Medium / High / Unacceptable) &middot; confidence score</p>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 4: Evaluation — Agent vs Human ODD report (produced by GPT5.5 deepthinking) -->
+<div class="slide" id="s4">
+  <h3>Agent Evaluation &mdash; RAG vs Human ODD Report</h3>
+  <h2>Two jobs, scored separately [judge:GPT5.5 deepthinking]</h2>
+  <p style="margin-bottom: 16px;">Benchmarked against the human ODD analyst report. The narrative (facts) and the risk ratings score <span class="highlight">very differently</span> &mdash; and fail for different reasons.</p>
+  <div class="cols cols-2">
+    <div class="card card-warn">
+      <h3>1. Narrative &mdash; facts <span class="score-mid" style="float: right;">6.5 <span style="font-size:0.55em;color:#64748b;">/ 10</span></span></h3>
+      <p class="small" style="margin: -4px 0 12px;">Human analyst benchmark: <span class="good">~9 / 10</span></p>
+      <p style="font-size: 0.98em;"><strong style="color:#6ee7b7;">Strengths:</strong> strong factual extraction from DDQ &amp; appendices; good structural coverage across ODD topics.</p>
+      <p style="font-size: 0.98em; margin-top: 8px;"><strong style="color:#fca5a5;">Weaknesses:</strong> limited mandate-specific focus (APG context often missing); generic firm-level content; verbose; lacks judgment from meetings &amp; analyst experience.</p>
+      <p class="small" style="margin-top: 12px;">Usable as a <strong>draft</strong>, but needs refinement for relevance and clarity.</p>
+    </div>
+    <div class="card card-bad">
+      <h3>2. Risk assessment &mdash; ratings <span class="score-mid" style="float: right; color:#ef4444;">3 <span style="font-size:0.55em;color:#64748b;">/ 10</span></span></h3>
+      <p class="small" style="margin: -4px 0 12px;">Human analyst benchmark: <span class="good">~9 / 10</span></p>
+      <p style="font-size: 0.98em;"><strong style="color:#fca5a5;">Findings:</strong> overestimates risk by relying on generic disclosures; poor calibration to mandate-specific <em>residual</em> risk; internal inconsistencies between rationale and rating.</p>
+      <table class="compact" style="margin-top: 12px;">
+        <tr><th>Chapter</th><th>Human</th><th>RAG</th></tr>
+        <tr><td>A &middot; Firm &amp; Org</td><td><span class="good">Low</span></td><td><span class="bad">High</span></td></tr>
+        <tr><td>B &middot; Risk Mgmt</td><td><span class="good">Low</span></td><td><span class="warn">Medium</span></td></tr>
+        <tr><td>C &middot; Valuation</td><td><span class="good">Low</span></td><td><span class="good">Low</span></td></tr>
+        <tr><td>D &middot; Operations</td><td><span class="good">Low</span></td><td><span class="warn">Medium</span></td></tr>
+        <tr><td><strong>Overall</strong></td><td><span class="good">Low</span></td><td><span class="bad">High</span></td></tr>
+      </table>
+    </div>
+  </div>
+  <p style="margin-top: 16px;">The narrative model is <strong>usable with refinement</strong>; the rating model <span class="bad">requires redesign</span> &mdash; focus on residual risk, align with APG rating definitions, and remove internal contradictions.</p>
+</div>
+
+<!-- SLIDE 5: Section Divider -->
+<div class="slide divider" id="s5">
+  <div>
+    <h3>Part 2</h3>
+    <div class="divider-line"></div>
+    <h2>Technical Deep Dive</h2>
+    <p>Architecture decisions and implementation specifics</p>
+  </div>
+</div>
+
+<!-- SLIDE 6: Two-Layer Architecture -->
+<div class="slide" id="s6">
+  <h3>Design Principle</h3>
+  <h2>Two-layer architecture</h2>
+  <div style="margin: 24px 0;">
+    <p style="margin-bottom: 20px;">Layer 1 is a <span class="highlight">reusable RAG foundation</span>. Layer 2 is <span class="warn">business-case specific</span>.</p>
+    <div class="pipeline">
+      <div class="pipe-box reuse">01 Setup</div>
+      <div class="pipe-arrow">&rarr;</div>
+      <div class="pipe-box reuse">02 Ingest</div>
+      <div class="pipe-arrow">&rarr;</div>
+      <div class="pipe-box reuse">03 Parse</div>
+      <div class="pipe-arrow">&rarr;</div>
+      <div class="pipe-box reuse">04 Chunk</div>
+      <div class="pipe-arrow">&rarr;</div>
+      <div class="pipe-box reuse">05 Index</div>
+      <div class="pipe-arrow" style="font-size: 1.8em; padding: 0 12px;">|</div>
+      <div class="pipe-box recode">06 Load Spec</div>
+      <div class="pipe-arrow">&rarr;</div>
+      <div class="pipe-box recode">07 Assess</div>
+      <div class="pipe-arrow">&rarr;</div>
+      <div class="pipe-box recode">08 Fill</div>
+    </div>
+    <div style="display: flex; justify-content: center; gap: 40px; margin-top: 12px;">
+      <span><span style="display: inline-block; width: 14px; height: 14px; background: #1e3a5f; border: 1px solid #3b82f6; border-radius: 3px; vertical-align: middle;"></span> Reuse as-is</span>
+      <span><span style="display: inline-block; width: 14px; height: 14px; background: #3b1f1f; border: 1px solid #ef4444; border-radius: 3px; vertical-align: middle;"></span> Recode per use case</span>
+    </div>
+  </div>
+  <div class="cols cols-3" style="margin-top: 16px;">
+    <div class="card card-accent">
+      <h3>ODD Report</h3>
+      <p>22 DDQ topics, risk ratings, Word template output</p>
+    </div>
+    <div class="card card-accent">
+      <h3>Financial Analyst</h3>
+      <p>Same 01&ndash;05, new spec, new prompts, maybe Excel output</p>
+    </div>
+    <div class="card card-accent">
+      <h3>Index Analyst</h3>
+      <p>Same 01&ndash;05, index methodology questions, different template</p>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 7: Source hierarchy — from _config.py -->
+<div class="slide" id="s7">
+  <h3>Technical Solution</h3>
+  <h2>Source hierarchy &mdash; classified at ingest</h2>
+  <p style="margin-bottom: 16px;">Every document gets a <code>source_role</code> at ingest; the role maps to a numeric <code>source_tier</code>. Lower tier = higher-priority evidence. The hierarchy is <span class="highlight">data, not code</span>.</p>
+  <div class="cols cols-2" style="margin-top: 4px;">
+    <div class="card" style="font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.92em; line-height: 1.7; white-space: pre; color: #94a3b8;"><span class="small"># _config.py</span>
+SOURCE_TIER_BY_ROLE = {
+    <span style="color:#e2e8f0;">"manager_completed_ddq"</span>: <b style="color:#60a5fa;">0</b>,
+    <span style="color:#e2e8f0;">"appendix"</span>:              <b style="color:#60a5fa;">1</b>,
+    <span style="color:#e2e8f0;">"policy"</span>:                <b style="color:#60a5fa;">2</b>,
+    <span style="color:#e2e8f0;">"assurance_report"</span>:      <b style="color:#60a5fa;">3</b>,
+    <span style="color:#e2e8f0;">"public_disclosure"</span>:     <b style="color:#60a5fa;">4</b>,
+    <span style="color:#e2e8f0;">"other"</span>:                 <b style="color:#60a5fa;">5</b>,
+    <span style="color:#e2e8f0;">"report_template"</span>:       <b style="color:#f59e0b;">9</b>,
+}</div>
+    <div>
+      <div class="card card-accent">
+        <h3>Keyword overrides</h3>
+        <p style="font-size: 0.98em;"><code>SOURCE_TIER_RULES</code> promotes a document by filename keyword: <code>policy / compliance / mnpi</code> &rarr; 2, <code>soc / isae / assurance</code> &rarr; 3, <code>annual / 10-k</code> &rarr; 4.</p>
+      </div>
+      <div class="card card-warn" style="margin-top: 14px;">
+        <h3>Excluded from the index</h3>
+        <p style="font-size: 0.98em;"><code>source_role='report_template'</code> (tier 9) &mdash; the ODD template must never be retrieved as evidence.</p>
+      </div>
+    </div>
+  </div>
+  <p style="margin-top: 18px;">Tier flows document &rarr; chunk &rarr; Vector Search index, and drives reranker priority &mdash; balanced quotas per source class so tier-0 DDQ chunks can't crowd out a required appendix.</p>
+</div>
+
+<!-- SLIDE 7b: Five-pass retrieval — example query per pass -->
+<div class="slide" id="s7b">
+  <h3>Technical Solution</h3>
+  <h2>Five-pass retrieval &mdash; same question, different evidence shelves</h2>
+  <p style="margin-bottom: 10px;">For each ODD topic, the agent builds one <strong>search brief</strong>: <code>section code + topic title + chapter title + topic prompt in agent.md + matching appendix titles</code>. It then checks the DDQ first, followed by supporting files.</p>
+  <div class="card card-accent" style="margin-bottom: 12px;">
+    <p style="font-size: 0.98em;"><strong>Worked example &mdash; A0300 Financial condition.</strong> The topic prompt in <code>agent.md</code> tells the search what an ODD analyst would look for:</p>
+    <p style="font-family: 'Cascadia Code', monospace; font-size: 0.76em; color: #93c5fd; margin-top: 6px; line-height: 1.45;">"A0300 Financial condition of the firm &middot; Firm &amp; Organisation &middot; <span class="warn">check annual report, audited financials, credit-rating evidence, and DDQ; extract AUM/revenue, net income/EBITDA, profitability, liquidity/funding, fee revenue vs fixed costs, concentration</span> &middot; <span class="good">Appendix 8 &ndash; 2024 Annual Report &ndash; State Street Corporation.pdf</span>"</p>
+  </div>
+  <table class="compact">
+    <tr><th style="width: 185px;">Evidence pass</th><th>What it means for the analyst</th><th>Source searched</th></tr>
+    <tr><td><strong>1. Matching DDQ section</strong></td><td>Start with the manager's answer for this exact topic.</td><td><code>source_role=manager_completed_ddq</code> + <code>A0300</code></td></tr>
+    <tr><td><strong>2. Referenced appendices</strong></td><td>If the DDQ answer mentions appendices, search those supporting files.</td><td><code>source_role=appendix</code></td></tr>
+    <tr><td><strong>3. Prompt-required appendix</strong></td><td>If the topic prompt says to check a source, add the matched filename to the search.</td><td><code>source_role=appendix</code></td></tr>
+    <tr><td><strong>4. DDQ fallback</strong></td><td>If that section is thin, scan the rest of the DDQ for related facts.</td><td><code>source_role=manager_completed_ddq</code></td></tr>
+    <tr><td><strong>5. Unlabelled evidence</strong></td><td>For sources without DDQ section codes, match by topic meaning.</td><td>DDQ, appendix, policy, assurance, disclosure, other</td></tr>
+  </table>
+  <p style="margin-top: 12px;">Here <code>source_role</code> means document type, not a person's role. Prompt-to-file examples: &ldquo;annual report&rdquo; &rarr; <code>Appendix 8</code>, &ldquo;ownership structure&rdquo; &rarr; <code>Appendix 7</code>, &ldquo;AML/KYC/sanctions&rdquo; &rarr; <code>Appendix 15</code>.</p>
+</div>
+
+<!-- SLIDE 8: Agent Spec -->
+<div class="slide" id="s8">
+  <h3>Technical Solution</h3>
+  <h2>Externalized agent spec: <code style="color: #60a5fa;">agent.md</code></h2>
+  <div class="cols cols-2" style="margin-top: 16px;">
+    <div>
+      <p>All prompt content lives in a single editable file, not in notebook code.</p>
+      <ul style="margin-top: 16px;">
+        <li><strong>&sect;1 General prompt</strong> &mdash; tone, length, structure, citation format</li>
+        <li><strong>&sect;2 Risk ratings</strong> &mdash; 4-level scale with definitions</li>
+        <li><strong>&sect;3 Topics</strong> &mdash; 22 DDQ topics, each with optional <code>Prompt:</code></li>
+        <li><strong>&sect;4 Part 2</strong> &mdash; chapter rollup rules</li>
+        <li><strong>&sect;5 Output contract</strong> &mdash; JSON schema the code expects</li>
+      </ul>
+    </div>
+    <div class="card" style="font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.85em; line-height: 1.8; color: #94a3b8; white-space: pre; overflow: hidden;">## 3. Part 1 &mdash; DDQ Topics
+
+<span style="color: #e2e8f0;">- <b>A0300</b> Financial condition</span>
+  <span style="color: #60a5fa;">Prompt:</span> do not rely only on
+  the DDQ. Always check the
+  latest annual report, audited
+  financials, credit-rating
+  evidence. Extract: revenue,
+  net income, profit margin,
+  EPS, mgmt-fee revenue vs
+  fixed costs &hellip;
+
+<span style="color: #e2e8f0;">- <b>A0900</b> Key person risk</span>
+  <span style="color: #60a5fa;">Prompt:</span> key person risk,
+  succession and retention
+  planning.</div>
+  </div>
+  <p style="margin-top: 20px;">The analyst can tune behavior by editing <code>agent.md</code> &mdash; no notebook changes, no redeployment. Topic prompts drive both retrieval queries and assessment generation.</p>
+</div>
+
+<!-- SLIDE 9: Fix 1 — Evidence Quality -->
+<div class="slide" id="s9">
+  <h3>Lessons Learned &mdash; Fix 1</h3>
+  <h2>Evidence quality: the question leakage bug</h2>
+  <div class="ba">
+    <div class="ba-before">
+      <h3 style="color: #fca5a5;">Before</h3>
+      <ul>
+        <li>DDQ <strong>question wording</strong> was mixed into <code>chunk_text</code></li>
+        <li>Assessment model quoted the question as if it were the manager's answer</li>
+        <li>All sources treated equally &mdash; no tier metadata on chunks</li>
+        <li>Appendix metadata went stale when classification changed but chunks weren't rebuilt</li>
+      </ul>
+    </div>
+    <div class="ba-after">
+      <h3 style="color: #6ee7b7;">After</h3>
+      <ul>
+        <li>Split <code>embedding_text</code> (question+answer, for retrieval) from <code>chunk_text</code> (answer only, for evidence)</li>
+        <li>Assessment model sees only manager answers and supporting evidence</li>
+        <li>Source tier and role flow from document &rarr; chunk &rarr; Vector Search index</li>
+        <li>Metadata changes trigger automatic status reset and rebuild</li>
+      </ul>
+    </div>
+  </div>
+  <div class="card" style="margin-top: 24px;">
+    <p><strong>Key insight:</strong> In RAG, what you <em>embed</em> for retrieval and what you <em>show</em> to the LLM as evidence are two different concerns. Mixing them caused the model to treat the questionnaire prompt as a factual source.</p>
+  </div>
+</div>
+
+<!-- SLIDE 10: Fix 2 — A0300 Retrieval -->
+<div class="slide" id="s10">
+  <h3>Lessons Learned &mdash; Fix 2</h3>
+  <h2>Retrieval precision: the A0300 case study</h2>
+  <div class="cols cols-2" style="margin-top: 8px;">
+    <div>
+      <p><strong>Problem:</strong> A0300 (Financial Condition) should always check the annual report. Appendix 8 contained revenue, net income, EPS, and margins &mdash; but the agent said <span class="bad">"no relevant financial data available."</span></p>
+      <p style="margin-top: 16px;"><strong>Root cause:</strong> The right evidence was in the index, but never reached the reranker. DDQ tier-0 chunks crowded it out of the top-N candidate list.</p>
+    </div>
+    <div>
+      <div class="card card-good">
+        <h3>Three generic fixes</h3>
+        <ul>
+          <li><strong>Prompt-to-appendix bridging</strong> &mdash; topic prompt says "annual report", matched to Appendix 8 filename automatically</li>
+          <li><strong>Balanced reranker sampling</strong> &mdash; reranker sees candidates from 4 buckets (section, semantic, appendix, mandatory external)</li>
+          <li><strong>Over-fetch before filtering</strong> &mdash; more candidates before final selection, so useful pages aren't lost behind decoys</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="card" style="margin-top: 20px;">
+    <p><strong>Key insight:</strong> In RAG with tiered sources, the highest-tier evidence can <em>starve</em> other required sources. Retrieval needs explicit slots per source class, not just a single ranked list.</p>
+  </div>
+</div>
+
+<!-- SLIDE 11: Reference retrieval / provenance — work in progress -->
+<div class="slide" id="s11">
+  <h3>Technical Solution &mdash; Work in Progress</h3>
+  <h2>Pointing back to the exact source</h2>
+  <p style="margin-bottom: 16px;">Every claim should cite a <span class="highlight">checkable location</span> &mdash; a PDF page, or a Word paragraph / page &mdash; so an analyst can verify it in seconds.</p>
+  <div class="cols cols-2" style="margin-top: 4px;">
+    <div class="card card-good">
+      <h3>What works today</h3>
+      <ul style="font-size: 0.98em;">
+        <li><strong>Unified provenance contract</strong> &mdash; parsed rows carry <code>source_page_num</code>, <code>source_para_num</code>, locator type and label; chunks carry start/end ranges</li>
+        <li><strong>PDF appendices</strong> cite real page numbers</li>
+        <li><strong>DDQ / DOCX</strong> cite paragraph-based locators</li>
+        <li>Citations render as <code>document | locator | tier</code> &mdash; internal counters (E1, E2) no longer leak as if they were references</li>
+      </ul>
+    </div>
+    <div class="card card-warn">
+      <h3>Not solved yet</h3>
+      <ul style="font-size: 0.98em;">
+        <li><strong>DOCX has no rendered Word page number</strong> &mdash; <code>source_page_num</code> is null, so citations fall back to paragraph locators instead of the page a reviewer sees</li>
+        <li>Needs a Word page-mapping step upstream in <code>03_parse_sources</code></li>
+        <li>Reviewers want <code>Appendix | page | quote | confidence</code> &mdash; the pipeline is not fully there</li>
+      </ul>
+    </div>
+  </div>
+  <p style="margin-top: 18px;"><span class="warn">This is the weakest part of the pipeline today.</span> Provenance unification is in place, but reliable page-level citation for Word documents still needs more work.</p>
+</div>
+
+<!-- SLIDE 12: Reusability -->
+<div class="slide" id="s12">
+  <h3>Lessons Learned</h3>
+  <h2>What's reusable, what isn't</h2>
+  <div style="margin-top: 16px;">
+    <table>
+      <tr><th>Step</th><th>Notebook</th><th>Other use cases</th><th style="width: 100px;">Status</th></tr>
+      <tr><td>Setup</td><td>01_setup</td><td>Creates generic Delta tables</td><td><span class="good">Reuse</span></td></tr>
+      <tr><td>Ingest</td><td>02_ingest</td><td>Scans any folder of docs</td><td><span class="good">Reuse</span></td></tr>
+      <tr><td>Parse</td><td>03_parse</td><td>PDF + DOCX extraction</td><td><span class="good">Reuse</span></td></tr>
+      <tr><td>Chunk</td><td>04_chunk</td><td>Sliding window, overlap</td><td><span class="good">Reuse</span></td></tr>
+      <tr><td>Index</td><td>05_index</td><td>Embed + Vector Search sync</td><td><span class="good">Reuse</span></td></tr>
+      <tr><td>Load spec</td><td>06_load_spec</td><td>Parses ODD template structure</td><td><span class="bad">Recode</span></td></tr>
+      <tr><td>Assess</td><td>07_assess</td><td>ODD-specific prompts &amp; retrieval</td><td><span class="bad">Recode</span></td></tr>
+      <tr><td>Fill</td><td>08_fill</td><td>ODD Word template</td><td><span class="bad">Recode</span></td></tr>
+      <tr><td>Spec</td><td>agent.md</td><td>ODD topics &amp; risk scale</td><td><span class="bad">Rewrite</span></td></tr>
+    </table>
+  </div>
+  <p style="margin-top: 20px;"><strong>~60%</strong> of the codebase (01&ndash;05) is a generic "documents &rarr; searchable chunks" pipeline. For a new use case, write a new <code>agent.md</code> and recode 06&ndash;08.</p>
+</div>
+
+<!-- SLIDE 13: Next Steps -->
+<div class="slide" id="s13">
+  <h3>What's Next</h3>
+  <h2>Next steps</h2>
+  <div class="cols cols-3" style="margin-top: 24px;">
+    <div class="card card-accent">
+      <h3>1. Analyst review</h3>
+      <ul>
+        <li>Fact checks</li>
+        <li>Benchmark for risk analysis</li>
+        <li>Think about expected reasoning ability from the agent</li>
+        <li>Think about evaluation criteria</li>
+      </ul>
+    </div>
+    <div class="card card-accent">
+      <h3>2. Evaluation harness</h3>
+      <ul>
+        <li>Gold-standard answer set</li>
+        <li>False-insufficient rate</li>
+        <li>Wrong-scope rate</li>
+        <li>Citation validity metric</li>
+        <li>Target: 6.5 &rarr; 8.5</li>
+      </ul>
+    </div>
+    <div class="card card-accent">
+      <h3>3. Next steps</h3>
+      <ul>
+        <li>Retrieval quality upgrade (<code>agent.md</code> improvement)</li>
+        <li>Data quality improvement (reference, Graph RAG)</li>
+        <li>Implementation in Foundry</li>
+        <li>Data ingestion, UI, evaluation framework</li>
+      </ul>
+    </div>
+  </div>
+  <div style="margin-top: 40px; text-align: center;">
+    <p style="font-size: 1.3em; color: #64748b;">The bottleneck is <span class="highlight">retrieval discipline</span>, not writing quality.</p>
+    <p style="font-size: 1.3em; color: #64748b;">Better evidence in &rarr; better report out.</p>
+  </div>
+</div>
+
+</div><!-- /deck -->
+
+<!-- Navigation -->
+<div class="slide-num" id="slideNum">1 / 14</div>
+<div class="progress" id="progress" style="width: 7.14%;"></div>
+<div class="nav">
+  <button onclick="go(-1)">&#8592; Prev</button>
+  <button onclick="go(1)">Next &#8594;</button>
+</div>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  let cur = 0;
+  function show(n) {
+    slides[cur].classList.remove('active');
+    cur = Math.max(0, Math.min(slides.length - 1, n));
+    slides[cur].classList.add('active');
+    document.getElementById('slideNum').textContent = (cur + 1) + ' / ' + slides.length;
+    document.getElementById('progress').style.width = ((cur + 1) / slides.length * 100) + '%';
+  }
+  function go(d) { show(cur + d); }
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); go(1); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); go(-1); }
+    if (e.key === 'Home') { e.preventDefault(); show(0); }
+    if (e.key === 'End') { e.preventDefault(); show(slides.length - 1); }
+  });
+</script>
+</body>
+</html>
